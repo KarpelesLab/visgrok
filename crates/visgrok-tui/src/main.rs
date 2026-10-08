@@ -12,6 +12,7 @@ use visgrok::Source;
 use visgrok::roles::fmt_hz;
 use visgrok::slogic::{Config, Pattern, SLogic};
 use visgrok::synth::Synth;
+use visgrok::vgk::VgkReader;
 
 use crate::pipeline::Pipeline;
 
@@ -19,9 +20,13 @@ use crate::pipeline::Pipeline;
 #[derive(Parser, Debug)]
 #[command(version, about = "Live capture and analysis for Sipeed SLogic logic analyzers")]
 pub struct Args {
-    /// Output file (sigrok session, .sr). Nothing is written when omitted.
+    /// Output file: compressed visgrok capture (.vgk), or a sigrok session
+    /// when the name ends in .sr. Nothing is written when omitted.
     #[arg(short, long)]
     output: Option<PathBuf>,
+    /// Replay a .vgk capture instead of capturing (combine with -o to convert).
+    #[arg(short, long)]
+    input: Option<PathBuf>,
     /// Sample rate, e.g. 20M, 100M. Defaults to the device's maximum for the
     /// channel count (16ch: 200M, 8ch: 400M, 4ch: 800M); 20M with --demo.
     #[arg(short, long, value_parser = parse_rate)]
@@ -70,6 +75,10 @@ fn parse_rate(s: &str) -> Result<u64, String> {
 
 fn open_source(args: &Args) -> Result<Box<dyn Source>, String> {
     let limit = |rate: u64| args.duration.map(|d| (d * rate as f64) as u64);
+    if let Some(p) = &args.input {
+        let r = VgkReader::open(p).map_err(|e| format!("{}: {e}", p.display()))?;
+        return Ok(Box::new(r));
+    }
     if args.demo {
         let rate = args.samplerate.unwrap_or(20_000_000);
         return Ok(Box::new(Synth::new(rate, limit(rate))));
@@ -112,7 +121,14 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let pipe = match Pipeline::start(source, args.output.clone()) {
+    let mut extra = Vec::new();
+    if let Some(t) = args.threshold {
+        extra.push(("threshold_v".to_string(), t.to_string()));
+    }
+    if args.emulation {
+        extra.push(("pattern".to_string(), "emulation".to_string()));
+    }
+    let pipe = match Pipeline::start(source, args.output.clone(), extra) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("visgrok: {e}");
@@ -133,8 +149,13 @@ fn main() {
 
 fn headless(pipe: &Pipeline, auto: bool) -> std::io::Result<()> {
     let mut applied = false;
+    let mut next_status = 1.0;
     while !pipe.finished() {
-        std::thread::sleep(Duration::from_secs(1));
+        std::thread::sleep(Duration::from_millis(100));
+        if pipe.seconds() < next_status {
+            continue;
+        }
+        next_status += 1.0;
         if auto && !applied && pipe.seconds() >= 2.0 {
             pipe.apply_suggestions();
             applied = true;

@@ -8,6 +8,7 @@
 //! - [`decode`]: streaming protocol decoders (UART, I2C, SPI).
 //! - [`source`]: the [`Source`] trait for block streams; [`synth`]: a synthetic source.
 //! - [`slogic`]: the SLogic USB driver.
+//! - [`vgk`]: the compressed visgrok capture format.
 //! - [`srzip`]: streaming sigrok `.sr` session writer.
 
 pub mod analyzer;
@@ -20,6 +21,7 @@ pub mod source;
 pub mod srzip;
 pub mod stats;
 pub mod synth;
+pub mod vgk;
 
 pub use block::Block;
 pub use edges::{EdgeDetector, Transition};

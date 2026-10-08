@@ -21,6 +21,9 @@ Status legend: ✅ done · 🚧 in progress · ⬜ planned
 - ✅ Streaming sigrok `.sr` writer (stored zip, Zip64 for large captures),
   verified with `sigrok-cli`.
 - ✅ Synthetic source for development without hardware.
+- ✅ Compressed `.vgk` capture format ([FORMAT.md](FORMAT.md)): parallel zstd
+  chunks via compcol, stored fallback under load, CRCs, crash-tolerant, index;
+  replay (`-i`) and conversion to `.sr`.
 
 ## Phase 2: SLogic driver
 - ✅ Device discovery (VID/PID table, bootloader detection, serial selection) via `rawusb`.

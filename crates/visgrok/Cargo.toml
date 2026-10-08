@@ -8,4 +8,5 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+compcol = { version = "0.7.2", default-features = false, features = ["alloc", "zstd"] }
 rawusb.workspace = true

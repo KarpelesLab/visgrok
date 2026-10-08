@@ -12,7 +12,7 @@ use ratatui::{DefaultTerminal, Frame};
 use visgrok::analyzer::Analyzer;
 use visgrok::roles::{BAUD_RATES, Role, Suggestion, fmt_hz};
 
-use crate::pipeline::{Pipeline, fmt_bytes, format_annotation};
+use crate::pipeline::{Pipeline, format_annotation};
 
 /// UI state that is not part of the pipeline.
 struct Ui {
@@ -267,7 +267,7 @@ fn draw_header(f: &mut Frame, area: Rect, pipe: &Pipeline, ui: &Ui, snap: &Snaps
         )),
     ];
     if let Some(p) = &pipe.output {
-        status.push(Span::raw(format!("│ {} → {} ", fmt_bytes(pipe.written()), p.display())));
+        status.push(Span::raw(format!("│ {} → {} ", pipe.written_text(), p.display())));
     }
     if pipe.finished() {
         status.push(Span::styled("│ CAPTURE ENDED ", Style::default().fg(Color::Yellow)));
@@ -430,7 +430,7 @@ mod tests {
     /// `--nocapture` to eyeball the layout.
     #[test]
     fn renders_demo() {
-        let pipe = Pipeline::start(Box::new(Synth::new(20_000_000, Some(20_000_000))), None).unwrap();
+        let pipe = Pipeline::start(Box::new(Synth::new(20_000_000, Some(20_000_000))), None, Vec::new()).unwrap();
         while !pipe.finished() {
             std::thread::sleep(Duration::from_millis(50));
         }

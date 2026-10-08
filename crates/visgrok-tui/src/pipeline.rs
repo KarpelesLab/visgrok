@@ -18,6 +18,7 @@ use visgrok::analyzer::{Analyzer, Tagged};
 use visgrok::decode::Event;
 use visgrok::roles::Role;
 use visgrok::srzip::SrZipWriter;
+use visgrok::vgk::{Meta, VgkWriter};
 use visgrok::{Block, CaptureInfo, Source};
 
 /// Shared state between the pipeline threads and the UI.
@@ -30,6 +31,7 @@ pub struct Pipeline {
     samples: AtomicU64,
     blocks_skipped: AtomicU64,
     written: AtomicU64,
+    raw_written: AtomicU64,
     stop: AtomicBool,
     done: AtomicBool,
     error: Mutex<Option<String>>,
@@ -40,14 +42,18 @@ pub struct Pipeline {
 
 impl Pipeline {
     /// Starts the capture threads.
-    pub fn start(source: Box<dyn Source>, output: Option<PathBuf>) -> Result<Arc<Pipeline>, String> {
+    ///
+    /// The output format follows the extension: `.sr` writes a sigrok
+    /// session, anything else the compressed visgrok format. `extra` is
+    /// recorded in the visgrok file's metadata.
+    pub fn start(
+        source: Box<dyn Source>,
+        output: Option<PathBuf>,
+        extra: Vec<(String, String)>,
+    ) -> Result<Arc<Pipeline>, String> {
         let info = source.info();
-        let names: Vec<String> = (0..info.channels).map(|i| format!("D{i}")).collect();
         let writer = match &output {
-            Some(p) => Some(
-                SrZipWriter::create(p, &names, info.samplerate, info.unit_size)
-                    .map_err(|e| format!("{}: {e}", p.display()))?,
-            ),
+            Some(p) => Some(Recorder::create(p, &info, extra).map_err(|e| format!("{}: {e}", p.display()))?),
             None => None,
         };
         let pipe = Pipeline {
@@ -58,6 +64,7 @@ impl Pipeline {
             samples: AtomicU64::new(0),
             blocks_skipped: AtomicU64::new(0),
             written: AtomicU64::new(0),
+            raw_written: AtomicU64::new(0),
             stop: AtomicBool::new(false),
             done: AtomicBool::new(false),
             error: Mutex::new(None),
@@ -124,13 +131,14 @@ impl Pipeline {
         self.done.store(true, Ordering::SeqCst);
     }
 
-    fn write(&self, mut w: SrZipWriter<std::io::BufWriter<std::fs::File>>, rx: Receiver<Arc<Block>>) {
+    fn write(&self, mut w: Recorder, rx: Receiver<Arc<Block>>) {
         for b in rx {
             if let Err(e) = w.write(&b.data) {
                 self.fail(format!("write: {e}"));
                 return;
             }
             self.written.store(w.bytes_written(), Ordering::Relaxed);
+            self.raw_written.store(w.raw_written(), Ordering::Relaxed);
         }
         match w.finish() {
             Ok(_) => {}
@@ -183,7 +191,7 @@ impl Pipeline {
             self.seconds()
         );
         if let Some(p) = &self.output {
-            s += &format!(", wrote {} to {}", fmt_bytes(self.written.load(Ordering::Relaxed)), p.display());
+            s += &format!(", wrote {} to {}", self.written_text(), p.display());
         }
         if let Some(e) = self.error() {
             s += &format!("; ERROR: {e}");
@@ -204,6 +212,17 @@ impl Pipeline {
     /// Bytes written to the output so far.
     pub fn written(&self) -> u64 {
         self.written.load(Ordering::Relaxed)
+    }
+
+    /// Output size as text, with the compression ratio when meaningful.
+    pub fn written_text(&self) -> String {
+        let w = self.written();
+        let raw = self.raw_written.load(Ordering::Relaxed);
+        if w > 0 && raw > w * 11 / 10 {
+            format!("{} ({:.0}x)", fmt_bytes(w), raw as f64 / w as f64)
+        } else {
+            fmt_bytes(w)
+        }
     }
 
     /// Blocks the analysis thread skipped because it was behind.
@@ -249,7 +268,7 @@ impl Pipeline {
             t,
             n,
             n as f64 / t / 1e6,
-            fmt_bytes(self.written()),
+            self.written_text(),
             self.blocks_skipped()
         )
     }
@@ -320,5 +339,52 @@ pub fn fmt_bytes(n: u64) -> String {
         format!("{:.1} kB", n / 1e3)
     } else {
         format!("{n} B")
+    }
+}
+
+/// An output file in either supported format.
+enum Recorder {
+    Sr(SrZipWriter<std::io::BufWriter<std::fs::File>>),
+    Vgk(VgkWriter<std::io::BufWriter<std::fs::File>>),
+}
+
+impl Recorder {
+    fn create(path: &std::path::Path, info: &CaptureInfo, extra: Vec<(String, String)>) -> std::io::Result<Recorder> {
+        if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("sr")) {
+            let names: Vec<String> = (0..info.channels).map(|i| format!("D{i}")).collect();
+            Ok(Recorder::Sr(SrZipWriter::create(path, &names, info.samplerate, info.unit_size)?))
+        } else {
+            let mut meta = Meta::from_info(info);
+            meta.extra = extra;
+            Ok(Recorder::Vgk(VgkWriter::create(path, &meta)?))
+        }
+    }
+
+    fn write(&mut self, data: &[u8]) -> std::io::Result<()> {
+        match self {
+            Recorder::Sr(w) => w.write(data),
+            Recorder::Vgk(w) => w.write(data),
+        }
+    }
+
+    fn bytes_written(&self) -> u64 {
+        match self {
+            Recorder::Sr(w) => w.bytes_written(),
+            Recorder::Vgk(w) => w.bytes_written(),
+        }
+    }
+
+    fn raw_written(&self) -> u64 {
+        match self {
+            Recorder::Sr(w) => w.bytes_written(),
+            Recorder::Vgk(w) => w.raw_written(),
+        }
+    }
+
+    fn finish(self) -> std::io::Result<()> {
+        match self {
+            Recorder::Sr(w) => w.finish().map(drop),
+            Recorder::Vgk(w) => w.finish().map(drop),
+        }
     }
 }
