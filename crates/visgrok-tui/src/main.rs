@@ -41,6 +41,9 @@ pub struct Args {
     /// Select the device with this serial number.
     #[arg(long)]
     serial: Option<String>,
+    /// Summarize a .vgk capture (per-channel activity over time) and exit.
+    #[arg(long, value_name = "FILE")]
+    info: Option<PathBuf>,
     /// List connected devices and exit.
     #[arg(long)]
     list: bool,
@@ -138,6 +141,13 @@ fn open_source(args: &Args) -> Result<Box<dyn Source>, String> {
 
 fn main() {
     let args = Args::parse();
+    if let Some(p) = &args.info {
+        if let Err(e) = info(p) {
+            eprintln!("visgrok: {}: {e}", p.display());
+            std::process::exit(1);
+        }
+        return;
+    }
     if args.list {
         match visgrok::slogic::list() {
             Ok(v) if v.is_empty() => println!("no devices found"),
@@ -203,7 +213,7 @@ fn main() {
         }
         names[ch] = Some(name.to_string());
     }
-    let setup = Setup { extra, roles, options, names };
+    let setup = Setup { extra, roles, options, names, lossless_analysis: args.input.is_some() };
     let pipe = match Pipeline::start(source, args.output.clone(), setup) {
         Ok(p) => p,
         Err(e) => {
@@ -247,6 +257,93 @@ fn headless(pipe: &Pipeline, auto: bool) -> std::io::Result<()> {
             }
         }
         eprintln!("{}", pipe.status_line());
+    }
+    Ok(())
+}
+
+/// Prints a per-channel summary of a capture, with an activity timeline.
+fn info(path: &std::path::Path) -> std::io::Result<()> {
+    use visgrok::stats::Stats;
+    use visgrok::{EdgeDetector, Transition};
+
+    let mut r = VgkReader::open(path)?;
+    let m = r.meta().clone();
+    let sr = m.samplerate as f64;
+    println!("file:       {}", path.display());
+    println!("device:     {}", m.device);
+    println!("channels:   {} @ {}", m.channels, fmt_hz(sr));
+    for (k, v) in &m.extra {
+        println!("{k:<11} {v}");
+    }
+    let n = m.channels;
+    let mask = if n >= 16 { 0xffff } else { (1u16 << n) - 1 };
+    let mut det = EdgeDetector::new(mask);
+    let mut stats = Stats::new(n);
+    let mut tr: Vec<Transition> = Vec::new();
+    // Edges per channel per time bucket.
+    let mut buckets: Vec<Vec<u64>> = Vec::new();
+    let mut first_state = None;
+    let mut samples = 0u64;
+    // Bucket size: aim for ~60 columns; computed once the total is known
+    // (from the index) or default to one second.
+    let total = visgrok::vgk::total_samples(path)?.unwrap_or(m.samplerate * 60);
+    let bucket = (total / 60).max(1);
+    while let Some(b) = r.read_block()? {
+        if first_state.is_none() {
+            let s = b.sample(0) & mask;
+            first_state = Some(s);
+            stats.init(s);
+        }
+        tr.clear();
+        det.process(&b, &mut tr);
+        stats.process(&tr);
+        stats.advance(b.end());
+        for t in &tr {
+            let k = (t.at / bucket) as usize;
+            if buckets.len() <= k {
+                buckets.resize(k + 1, vec![0; n]);
+            }
+            let mut c = t.changed();
+            while c != 0 {
+                let ch = c.trailing_zeros() as usize;
+                c &= c - 1;
+                buckets[k][ch] += 1;
+            }
+        }
+        samples = b.end();
+    }
+    buckets.resize(samples.div_ceil(bucket) as usize, vec![0; n]);
+    println!("duration:   {:.3} s ({} samples){}", samples as f64 / sr, samples, if r.truncated { ", file truncated" } else { "" });
+    println!();
+    println!("{:<8} {:>5} {:>12} {:>14} {:>7} {:>11}  first/last edge", "channel", "start", "edges", "frequency", "duty", "min pulse");
+    for (i, c) in stats.channels.iter().enumerate() {
+        let name = m.names.get(i).cloned().unwrap_or_else(|| format!("D{i}"));
+        let start = first_state.map_or("-", |s| if s >> i & 1 != 0 { "HIGH" } else { "low" });
+        let freq = c.median_period().map(|p| fmt_hz(sr / p as f64)).unwrap_or_default();
+        let duty = c.duty().map(|d| format!("{:.1}%", d * 100.0)).unwrap_or_default();
+        let minp = Some(c.min_high.min(c.min_low)).filter(|&v| v != u64::MAX).map(|v| format!("{:.0} ns", v as f64 / sr * 1e9)).unwrap_or_default();
+        let span = match (buckets.iter().position(|b| b[i] > 0), buckets.iter().rposition(|b| b[i] > 0)) {
+            (Some(a), Some(z)) => format!("{:.1}s .. {:.1}s", (a as u64 * bucket) as f64 / sr, ((z as u64 + 1) * bucket) as f64 / sr),
+            _ => "-".into(),
+        };
+        println!("{name:<8} {start:>5} {:>12} {freq:>14} {duty:>7} {minp:>11}  {span}", c.edges());
+    }
+    println!();
+    println!("activity ({:.2} s per column; ' ' none, ░▒▓█ increasing edge rate):", bucket as f64 / sr);
+    for i in 0..n {
+        let name = m.names.get(i).cloned().unwrap_or_else(|| format!("D{i}"));
+        let max = buckets.iter().map(|b| b[i]).max().unwrap_or(0);
+        let line: String = buckets
+            .iter()
+            .map(|b| match b[i] {
+                0 => ' ',
+                v if max > 0 && v * 4 <= max => '░',
+                v if v * 2 <= max => '▒',
+                v if v * 4 <= max * 3 => '▓',
+                _ => '█',
+            })
+            .collect();
+        println!("{name:<8} |{line}|");
     }
     Ok(())
 }

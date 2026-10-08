@@ -32,6 +32,8 @@ pub struct Setup {
     pub options: DecoderOptions,
     /// Channel names (`None`: `D<n>`).
     pub names: Vec<Option<String>>,
+    /// Never skip blocks in analysis (replaying a file: the source can wait).
+    pub lossless_analysis: bool,
 }
 
 /// Shared state between the pipeline threads and the UI.
@@ -69,7 +71,7 @@ impl Pipeline {
         setup: Setup,
     ) -> Result<Arc<Pipeline>, String> {
         let info = source.info();
-        let Setup { extra, mut roles, options, names } = setup;
+        let Setup { extra, mut roles, options, names, lossless_analysis } = setup;
         roles.resize(info.channels, None);
         let names: Vec<String> = (0..info.channels)
             .map(|i| names.get(i).cloned().flatten().unwrap_or_else(|| format!("D{i}")))
@@ -103,7 +105,7 @@ impl Pipeline {
         let mut threads = Vec::new();
         let s = shared.clone();
         let wtx = writer.is_some().then_some(wtx);
-        threads.push(std::thread::spawn(move || s.acquire(source, wtx, atx)));
+        threads.push(std::thread::spawn(move || s.acquire(source, wtx, atx, lossless_analysis)));
         if let Some(w) = writer {
             let s = shared.clone();
             threads.push(std::thread::spawn(move || s.write(w, wrx)));
@@ -122,7 +124,13 @@ impl Pipeline {
         self.stop.store(true, Ordering::SeqCst);
     }
 
-    fn acquire(&self, mut source: Box<dyn Source>, wtx: Option<SyncSender<Arc<Block>>>, atx: SyncSender<Arc<Block>>) {
+    fn acquire(
+        &self,
+        mut source: Box<dyn Source>,
+        wtx: Option<SyncSender<Arc<Block>>>,
+        atx: SyncSender<Arc<Block>>,
+        lossless: bool,
+    ) {
         let mut stopping = false;
         loop {
             if !stopping && self.stop.load(Ordering::SeqCst) {
@@ -137,6 +145,10 @@ impl Pipeline {
                         && w.send(b.clone()).is_err()
                     {
                         break;
+                    }
+                    if lossless {
+                        let _ = atx.send(b);
+                        continue;
                     }
                     match atx.try_send(b) {
                         Ok(()) => {}
