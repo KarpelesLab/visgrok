@@ -59,7 +59,7 @@ cargo run --release --example selftest -- capture.vgk   # verify an emulation-pa
 ## Sidecar files (`<capture>.json`)
 
 What the signals *are* lives next to the capture, in `run1.vgk.json` (or
-`navi.sr.json` for a sigrok file): channel names, the role of each channel
+`boot.sr.json` for a sigrok file): channel names, the role of each channel
 (which wires form which bus), decoder settings, recording settings,
 bookmarks and notes. It is plain JSON, works for every capture format, and
 can change after the capture is closed (the `.vgk` itself is append-only).
@@ -79,7 +79,7 @@ can change after the capture is closed (the `.vgk` itself is append-only).
   "decoders": {"spi_protocol":"ssd1306","spi_mode":null,"spi_cs_active_high":false,"uart_format":"auto","uart_follow":true},
   "recording": {"device":"SLogic16 U3 #202512191855","samplerate":200000000,"threshold_v":1.65},
   "bookmarks": [{"sample":1031167000,"label":"CMD42 SET_PWD"}],
-  "notes": "head unit boot"
+  "notes": "power-on sequence"
 }
 ```
 

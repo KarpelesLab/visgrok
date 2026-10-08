@@ -52,7 +52,7 @@ output `*.sr` to write a sigrok session for PulseView / `sigrok-cli` directly.
 
 ```sh
 visgrok web                        # http://127.0.0.1:8090/, captures in ./captures
-visgrok web --dir ~/captures navi.sr   # open a capture right away
+visgrok web --dir ~/captures boot.sr   # open a capture right away
 ```
 
 From the browser: record (SLogic or demo source; channels, rate, threshold),

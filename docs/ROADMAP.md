@@ -31,7 +31,7 @@ Status legend: ✅ done · 🚧 in progress · ⬜ planned
   data commands so busy isn't misread; block sizes confirmed by CRC (CMD16 /
   CMD42 18-byte password blocks); CMD42 payload decoding; clock-relative glitch
   filter, frame resynchronization and plausibility checks against CMD crosstalk.
-  Verified on a real 20 s head-unit boot capture: all 29,257 blocks CRC-clean.
+  Verified on a real 20 s capture of a device booting from a card: all 29,257 blocks CRC-clean.
   SD-over-SPI not yet.
 - ✅ Streaming sigrok `.sr` writer (stored zip, Zip64 for large captures),
   verified with `sigrok-cli`.

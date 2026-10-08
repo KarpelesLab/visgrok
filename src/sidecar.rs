@@ -1,7 +1,7 @@
 //! Capture sidecar files: what the signals in a capture *are*.
 //!
 //! A capture file holds samples; the sidecar next to it (`<capture>.json`,
-//! e.g. `run1.vgk.json`, `navi.sr.json`) holds what makes them meaningful:
+//! e.g. `run1.vgk.json`, `boot.sr.json`) holds what makes them meaningful:
 //! channel names, the role of each channel (which wires form which bus),
 //! decoder settings, recording settings, bookmarks and free-form notes. It
 //! is plain JSON so it can be read, diffed and edited by hand, it works for
@@ -21,7 +21,7 @@
 //!                "uart_format": "auto", "uart_follow": true, "uart_protocol": "raw"},
 //!   "recording": {"device": "SLogic16 U3", "samplerate": 200000000, "threshold_v": 1.65},
 //!   "bookmarks": [{"sample": 1031000000, "label": "CMD42"}],
-//!   "notes": "head unit boot, card in slot 1"
+//!   "notes": "power-on, card in slot 1"
 //! }
 //! ```
 //!
