@@ -4,8 +4,15 @@ A from-scratch Rust driver for Sipeed SLogic logic analyzers (SLogic16 U3,
 SLogic32 U3, SLogic Combo 8), with continuous streaming to disk, real-time
 signal analysis and a terminal UI.
 
-- `crates/visgrok` — library: USB protocol (on top of [`rawusb`](https://github.com/KarpelesLab/rawusb)), streaming, analysis, file output.
-- `crates/visgrok-tui` — `visgrok` binary: live TUI while recording.
+One crate, `visgrok`:
+
+- the library (`src/`): USB driver (on top of [`rawusb`](https://github.com/KarpelesLab/rawusb)), streaming, analysis, decoders, file formats;
+- the `visgrok` binary (`src/bin/visgrok/`, feature `cli`, on by default): live TUI, recording, replay and conversion.
+
+```sh
+cargo install visgrok            # the binary
+cargo add visgrok --no-default-features   # just the library
+```
 
 See [docs/PROTOCOL.md](docs/PROTOCOL.md) for the USB protocol and
 [docs/ROADMAP.md](docs/ROADMAP.md) for the plan.
@@ -23,7 +30,7 @@ cargo build --release
 # No hardware: synthetic UART/I2C/SPI/clock signals
 ./target/release/visgrok --demo --auto
 # Verify the USB link: device test pattern checked sample by sample
-cargo run --release -p visgrok --example selftest -- 16 100000000 5
+cargo run --release --example selftest -- 16 100000000 5
 ```
 
 Convert between formats (`.vgk`, `.sr` — stored or deflated, read from

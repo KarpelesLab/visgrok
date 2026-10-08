@@ -46,13 +46,18 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Clippy (warnings denied)
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Test
-        run: cargo test --workspace --all-features
+        run: cargo test --all-features
 
       - name: Build release binary
-        run: cargo build --release -p visgrok-tui
+        run: cargo build --release
+
+      # The library on its own must build without the CLI dependencies.
+      - name: Library only (no default features)
+        if: runner.os == 'Linux'
+        run: cargo clippy --lib --no-default-features -- -D warnings
 
   msrv:
     name: MSRV (Rust 1.89)
@@ -73,7 +78,7 @@ jobs:
           key: msrv
 
       - name: cargo check --all-targets
-        run: cargo check --workspace --all-features --all-targets
+        run: cargo check --all-features --all-targets
 
   docs:
     name: Docs build (warnings denied)
@@ -90,4 +95,4 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: cargo doc --no-deps
-        run: cargo doc --workspace --no-deps --all-features
+        run: cargo doc --no-deps --all-features

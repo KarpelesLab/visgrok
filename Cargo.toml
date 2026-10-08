@@ -1,14 +1,32 @@
-[workspace]
-resolver = "3"
-members = ["crates/visgrok", "crates/visgrok-tui"]
-
-[workspace.package]
+[package]
+name = "visgrok"
+description = "From-scratch driver, real-time protocol analysis and TUI for Sipeed SLogic logic analyzers"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT"
 repository = "https://github.com/KarpelesLab/visgrok"
+homepage = "https://github.com/KarpelesLab/visgrok"
+readme = "README.md"
+keywords = ["logic-analyzer", "sigrok", "slogic", "usb", "protocol-decoder"]
+categories = ["hardware-support", "command-line-utilities", "parser-implementations"]
+exclude = [".github", "capture.sh"]
 
-[workspace.dependencies]
+[features]
+default = ["cli"]
+# The `visgrok` binary (terminal UI and command line). Library users can turn
+# it off to skip the TUI dependencies.
+cli = ["dep:clap", "dep:ratatui"]
+
+[[bin]]
+name = "visgrok"
+path = "src/bin/visgrok/main.rs"
+required-features = ["cli"]
+# Same name as the library: keep it out of rustdoc output.
+doc = false
+
+[dependencies]
+compcol = { version = "0.7.2", default-features = false, features = ["alloc", "zstd", "deflate"] }
 rawusb = "0.1.6"
-visgrok = { path = "crates/visgrok" }
+clap = { version = "4.6.7", features = ["derive"], optional = true }
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm", "layout-cache"], optional = true }

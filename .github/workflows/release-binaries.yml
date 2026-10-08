@@ -1,0 +1,159 @@
+name: Release binaries
+
+# Attaches the `visgrok` CLI binary, built for Linux, Windows and macOS, to a
+# GitHub Release. release-plz creates the release and then dispatches this
+# workflow explicitly (see release-plz.yml), so workflow_dispatch is the sole,
+# deterministic trigger — we do NOT also listen on `release: published`, which
+# would double-fire and race two upload runs against the same release. The
+# manual dispatch also lets a failed asset upload be retried against an
+# existing release without re-tagging.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to upload to (e.g. v0.1.1)"
+        required: true
+        type: string
+
+permissions:
+  # gh release upload needs to attach assets.
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # The release tag to upload against, supplied by the workflow_dispatch input.
+  TAG: ${{ inputs.tag }}
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+            asset_suffix: linux-x86_64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+            asset_suffix: linux-aarch64
+            apt_packages: gcc-aarch64-linux-gnu
+            linker: aarch64-linux-gnu-gcc
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+            asset_suffix: windows-x86_64
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+            asset_suffix: windows-aarch64
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Install cross compiler (Linux aarch64)
+        if: matrix.apt_packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.apt_packages }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build CLI
+        shell: bash
+        env:
+          # Only set the linker env var when the matrix entry asks for one.
+          # GitHub Actions silently drops empty `env:` values, so this is
+          # a no-op for the native targets.
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.linker }}
+        run: cargo build --release --bin visgrok --target ${{ matrix.target }}
+
+      - name: Stage archive contents
+        shell: bash
+        run: |
+          mkdir -p staging
+          cp README.md LICENSE CHANGELOG.md staging/
+          td="target/${{ matrix.target }}/release"
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            cp "$td/visgrok.exe" staging/
+          else
+            cp "$td/visgrok" staging/
+          fi
+          ls -R staging
+
+      - name: Pack archive
+        id: pack
+        shell: bash
+        run: |
+          name="visgrok-${TAG}-${{ matrix.asset_suffix }}"
+          if [[ "${{ matrix.archive }}" == "zip" ]]; then
+            asset="${name}.zip"
+            (cd staging && 7z a "../${asset}" *)
+          else
+            asset="${name}.tar.gz"
+            tar -C staging -czf "${asset}" .
+          fi
+          echo "asset=${asset}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload to release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${TAG}" "${{ steps.pack.outputs.asset }}" --clobber
+
+  build-macos-universal:
+    name: build macos universal
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-universal
+
+      - name: Build both Apple slices
+        run: |
+          for t in x86_64-apple-darwin aarch64-apple-darwin; do
+            cargo build --release --bin visgrok --target "$t"
+          done
+
+      - name: Lipo into a universal binary
+        run: |
+          mkdir -p staging
+          lipo -create -output staging/visgrok \
+            target/x86_64-apple-darwin/release/visgrok \
+            target/aarch64-apple-darwin/release/visgrok
+          cp README.md LICENSE CHANGELOG.md staging/
+          file staging/visgrok
+
+      - name: Pack archive
+        id: pack
+        run: |
+          asset="visgrok-${TAG}-macos-universal.tar.gz"
+          tar -C staging -czf "${asset}" .
+          echo "asset=${asset}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${TAG}" "${{ steps.pack.outputs.asset }}" --clobber

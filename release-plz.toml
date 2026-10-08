@@ -1,0 +1,4 @@
+[workspace]
+# Tags look like v1.2.3; each new release dispatches release-binaries.yml
+# (see .github/workflows/release-plz.yml) to attach the CLI binaries.
+git_tag_name = "v{{ version }}"

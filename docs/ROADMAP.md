@@ -6,7 +6,7 @@ driver, with continuous lossless streaming to disk, real-time analysis and a TUI
 Status legend: ✅ done · 🚧 in progress · ⬜ planned
 
 ## Phase 0: protocol analysis
-- ✅ Workspace skeleton (`visgrok` library, `visgrok-tui` binary).
+- ✅ Crate skeleton: `visgrok` library plus the `visgrok` binary (feature `cli`).
 - ✅ Document the USB protocol of the SLogic family from Sipeed's libsigrok fork,
   their other sources and the connected SLogic16 U3 → [PROTOCOL.md](PROTOCOL.md).
 - ✅ Verify requests, sample format, rate encoding and quirks on a SLogic16 U3.

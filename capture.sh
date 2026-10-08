@@ -24,7 +24,7 @@ cd "$(dirname "$0")"
 RATE=${RATE:-200M}
 OUT=${OUT-capture-$(date +%Y%m%d-%H%M%S).vgk}
 
-cargo build --release -q -p visgrok-tui
+cargo build --release -q
 
 set -- -c 8 -s "$RATE" \
     -n 0=CLK8M -n 1=RESET -n 2=UART -n 3=SCLK -n 4=DC -n 5=CS -n 6=MOSI \

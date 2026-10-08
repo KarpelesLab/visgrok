@@ -53,5 +53,5 @@ Codecs: `0` stored, `1` zstd (one frame per chunk).
 ```sh
 visgrok -i capture.vgk --headless --auto     # replay through the analyzers
 visgrok -i capture.vgk -o capture.sr --headless   # convert for PulseView
-cargo run --release -p visgrok --example selftest -- capture.vgk   # verify an emulation-pattern capture
+cargo run --release --example selftest -- capture.vgk   # verify an emulation-pattern capture
 ```
