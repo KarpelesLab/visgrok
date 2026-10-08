@@ -185,6 +185,37 @@ struct Job {
     compress: bool,
 }
 
+/// Part of an overview tile: (state at its first sample, OR and AND of
+/// its samples, sample count).
+type TilePart = (u32, u32, u32, u64);
+
+/// Splits a chunk starting at sample `first` at overview tile boundaries.
+fn tile_parts(first: u64, data: &[u8], unit: usize) -> Vec<TilePart> {
+    let tile = crate::store::TILE;
+    let n = data.len() / unit;
+    let sample = |i: usize| {
+        let mut v = [0u8; 4];
+        v[..unit].copy_from_slice(&data[i * unit..i * unit + unit]);
+        u32::from_le_bytes(v)
+    };
+    let mut out = Vec::with_capacity(n / tile as usize + 2);
+    let mut i = 0;
+    while i < n {
+        let room = (tile - (first + i as u64) % tile) as usize;
+        let end = (i + room).min(n);
+        let s0 = sample(i);
+        let (mut or, mut and) = (s0, s0);
+        for k in i + 1..end {
+            let s = sample(k);
+            or |= s;
+            and &= s;
+        }
+        out.push((s0, or, and, (end - i) as u64));
+        i = end;
+    }
+    out
+}
+
 /// Writes a `.vgk` file, compressing chunks on a pool of worker threads.
 pub struct VgkWriter<W: Write + Send + 'static> {
     out: W,
@@ -196,8 +227,12 @@ pub struct VgkWriter<W: Write + Send + 'static> {
     samples: u64,
     /// First sample of the chunk being filled.
     chunk_first: u64,
-    /// Encodes chunks; yields (raw length, encoded chunk) in order.
-    pool: OrderedPool<Job, (u64, Vec<u8>)>,
+    /// Encodes chunks; yields (raw length, encoded chunk, overview tile
+    /// parts) in order.
+    pool: OrderedPool<Job, (u64, Vec<u8>, Vec<TilePart>)>,
+    /// Overview tiles of the chunks written, and the one being filled.
+    tiles: Vec<crate::store::Tile>,
+    tile_acc: Option<TilePart>,
     /// Called (after a flush) for every sample chunk that reaches the file.
     on_chunk: Option<Box<dyn FnMut(ChunkRef) + Send>>,
     /// Overview chunk payload to write at `finish`.
@@ -226,10 +261,11 @@ impl<W: Write + Send + 'static> VgkWriter<W> {
         h.extend_from_slice(text.as_bytes());
         h.extend_from_slice(&crc32(text.as_bytes()).to_le_bytes());
         out.write_all(&h)?;
-        let pool = OrderedPool::new(threads, |job: Job| {
-            (job.data.len() as u64, encode_chunk(job.first, &job.data, job.compress))
-        });
         let unit = meta.unit_size;
+        let pool = OrderedPool::new(threads, move |job: Job| {
+            let parts = tile_parts(job.first, &job.data, unit);
+            (job.data.len() as u64, encode_chunk(job.first, &job.data, job.compress), parts)
+        });
         let chunk_size = (chunk_size / unit).max(1) * unit;
         Ok(VgkWriter {
             out,
@@ -245,6 +281,8 @@ impl<W: Write + Send + 'static> VgkWriter<W> {
             stored_chunks: 0,
             on_chunk: None,
             overview: None,
+            tiles: Vec::new(),
+            tile_acc: None,
         })
     }
 
@@ -306,7 +344,8 @@ impl<W: Write + Send + 'static> VgkWriter<W> {
         self.on_chunk = Some(Box::new(f));
     }
 
-    /// Sets the overview tiles written by [`VgkWriter::finish`].
+    /// Sets the overview tiles written by [`VgkWriter::finish`] (by default,
+    /// the writer computes them from the samples).
     pub(crate) fn set_overview(&mut self, tile: u64, tiles: &[crate::store::Tile]) {
         let mut p = Vec::with_capacity(16 + tiles.len() * 8);
         p.extend_from_slice(&tile.to_le_bytes());
@@ -320,7 +359,20 @@ impl<W: Write + Send + 'static> VgkWriter<W> {
 
     /// Writes finished chunks in order; with `all`, waits for every one.
     fn collect(&mut self, all: bool) -> io::Result<()> {
-        while let Some((raw, bytes)) = self.pool.next(all) {
+        while let Some((raw, bytes, parts)) = self.pool.next(all) {
+            for (first, or, and, count) in parts {
+                let acc = self.tile_acc.get_or_insert((first, or, and, 0));
+                acc.1 |= or;
+                acc.2 &= and;
+                acc.3 += count;
+                if acc.3 == crate::store::TILE {
+                    self.tiles.push(crate::store::Tile {
+                        first: acc.0,
+                        changed: acc.1 ^ acc.2,
+                    });
+                    self.tile_acc = None;
+                }
+            }
             let first = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
             let offset = self.pos;
             self.index.push((offset, first));
@@ -344,6 +396,13 @@ impl<W: Write + Send + 'static> VgkWriter<W> {
     pub fn finish(mut self) -> io::Result<W> {
         self.submit();
         self.collect(true)?;
+        if self.overview.is_none() {
+            let mut tiles = std::mem::take(&mut self.tiles);
+            if let Some((first, or, and, _)) = self.tile_acc.take() {
+                tiles.push(crate::store::Tile { first, changed: or ^ and });
+            }
+            self.set_overview(crate::store::TILE, &tiles);
+        }
         if let Some(ov) = self.overview.take() {
             let packed = compress_to_vec_with::<Zstd>(&ov, EncoderConfig { level: 3 })
                 .ok()
@@ -660,6 +719,45 @@ impl<R: Read + Send> Source for VgkReader<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The writer computes the overview itself, also with chunks that do
+    /// not line up with tiles.
+    #[test]
+    fn overview_from_samples() {
+        let meta = Meta {
+            device: "test".into(),
+            channels: 8,
+            samplerate: 1_000_000,
+            unit_size: 1,
+            names: (0..8).map(|i| format!("D{i}")).collect(),
+            started_ms: 1,
+            extra: Vec::new(),
+        };
+        // ch0 toggles every 3000 samples; ch1 only in 10000..10010.
+        let data: Vec<u8> = (0..30_001u32)
+            .map(|i| ((i / 3000) & 1) as u8 | (((10_000..10_010).contains(&i)) as u8) << 1)
+            .collect();
+        let mut w = VgkWriter::new(Vec::new(), &meta, 5000, Some(2)).unwrap();
+        w.write(&data).unwrap();
+        let buf = w.finish().unwrap();
+        let dir = std::env::temp_dir().join(format!("vgk-ov-{}", std::process::id()));
+        std::fs::write(&dir, &buf).unwrap();
+        let sc = scan(&dir).unwrap();
+        std::fs::remove_file(&dir).ok();
+        let (tile, tiles) = sc.overview.expect("overview");
+        assert_eq!(tile, crate::store::TILE);
+        let want: Vec<crate::store::Tile> = data
+            .chunks(tile as usize)
+            .map(|c| {
+                let (or, and) = c.iter().fold((0u32, 0xffu32), |(o, a), &s| (o | s as u32, a & s as u32));
+                crate::store::Tile {
+                    first: c[0] as u32,
+                    changed: or ^ and,
+                }
+            })
+            .collect();
+        assert_eq!(tiles, want);
+    }
 
     #[test]
     fn roundtrip() {
