@@ -9,6 +9,8 @@ use std::time::Duration;
 
 use clap::Parser;
 use visgrok::Source;
+use visgrok::roles::fmt_hz;
+use visgrok::slogic::{Config, Pattern, SLogic};
 use visgrok::synth::Synth;
 
 use crate::pipeline::Pipeline;
@@ -23,9 +25,21 @@ pub struct Args {
     /// Sample rate, e.g. 20M, 100M, 400k.
     #[arg(short, long, default_value = "20M", value_parser = parse_rate)]
     samplerate: u64,
-    /// Number of channels to capture.
+    /// Number of channels to capture (4, 8 or 16).
+    #[arg(short, long, default_value_t = 16)]
+    channels: usize,
+    /// Input threshold in volts (default: device default, about 2.0 V).
     #[arg(short, long)]
-    channels: Option<usize>,
+    threshold: Option<f64>,
+    /// Select the device with this serial number.
+    #[arg(long)]
+    serial: Option<String>,
+    /// List connected devices and exit.
+    #[arg(long)]
+    list: bool,
+    /// Capture the device's built-in emulation pattern instead of the inputs.
+    #[arg(long)]
+    emulation: bool,
     /// Stop after this many seconds.
     #[arg(short, long)]
     duration: Option<f64>,
@@ -58,11 +72,36 @@ fn open_source(args: &Args) -> Result<Box<dyn Source>, String> {
     if args.demo {
         return Ok(Box::new(Synth::new(args.samplerate, limit)));
     }
-    Err("no hardware driver yet; use --demo".into())
+    let dev = SLogic::open(args.serial.as_deref()).map_err(|e| e.to_string())?;
+    let mut cfg = Config::new(args.channels, args.samplerate);
+    cfg.threshold = args.threshold;
+    cfg.limit = limit;
+    if args.emulation {
+        cfg.pattern = Pattern::Emulation;
+    }
+    if let Err(e) = dev.validate(&cfg) {
+        let m = dev.model();
+        let rates: Vec<String> = m
+            .samplerates()
+            .into_iter()
+            .filter(|&r| r <= m.max_samplerate(args.channels))
+            .map(|r| fmt_hz(r as f64))
+            .collect();
+        return Err(format!("{e}\nvalid rates for {} channels: {}", args.channels, rates.join(", ")));
+    }
+    Ok(Box::new(dev.start(cfg).map_err(|e| e.to_string())?))
 }
 
 fn main() {
     let args = Args::parse();
+    if args.list {
+        match visgrok::slogic::list() {
+            Ok(v) if v.is_empty() => println!("no devices found"),
+            Ok(v) => v.iter().for_each(|f| println!("{f}")),
+            Err(e) => eprintln!("visgrok: {e}"),
+        }
+        return;
+    }
     let source = match open_source(&args) {
         Ok(s) => s,
         Err(e) => {

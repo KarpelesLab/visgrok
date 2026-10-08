@@ -139,8 +139,20 @@ impl Pipeline {
     }
 
     fn analyze(&self, rx: Receiver<Arc<Block>>) {
+        // Work in slices so the UI can take the lock between them even when
+        // dense signals make analysis slow.
+        const SLICE: usize = 1 << 18;
         for b in rx {
-            self.analyzer.lock().unwrap().process(&b);
+            let mut i = 0;
+            while i < b.len() {
+                if self.stop.load(Ordering::Relaxed) {
+                    return;
+                }
+                let part = b.slice(i, i + SLICE);
+                self.analyzer.lock().unwrap().process(&part);
+                i += SLICE;
+                std::thread::yield_now();
+            }
         }
     }
 

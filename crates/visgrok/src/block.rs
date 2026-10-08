@@ -49,6 +49,13 @@ impl Block {
         }
     }
 
+    /// Copies samples `from..to` (indices within the block) into a new block.
+    pub fn slice(&self, from: usize, to: usize) -> Block {
+        let to = to.min(self.len());
+        let from = from.min(to);
+        Block::new(self.start + from as u64, self.unit_size, self.data[from * self.unit_size..to * self.unit_size].to_vec())
+    }
+
     /// Iterates over all samples as channel bitmasks.
     pub fn samples(&self) -> impl Iterator<Item = u16> + '_ {
         (0..self.len()).map(move |i| self.sample(i))

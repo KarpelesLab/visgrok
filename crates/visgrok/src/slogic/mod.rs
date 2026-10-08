@@ -507,7 +507,7 @@ impl SLogic {
                 if base == 0 {
                     return Err(Error::Config(format!("no base clock for {rate} Hz")));
                 }
-                if base % rate == 0 {
+                if base.is_multiple_of(rate) {
                     let div = base / rate;
                     if !(1..=256).contains(&div) {
                         return Err(Error::Config(format!("{rate} Hz needs divider {div} (max 256)")));

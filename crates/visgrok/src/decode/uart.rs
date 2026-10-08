@@ -176,10 +176,7 @@ mod tests {
             for k in 0..8 {
                 levels.push(b >> k & 1 != 0);
             }
-            levels.push(true);
-            for _ in 0..gap {
-                levels.push(true);
-            }
+            levels.extend(std::iter::repeat_n(true, 1 + gap as usize));
         }
         let mut out = Vec::new();
         let mut cur = true;
