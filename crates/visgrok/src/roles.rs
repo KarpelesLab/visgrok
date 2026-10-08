@@ -21,9 +21,10 @@ pub enum Role {
         /// Frequency in Hz.
         hz: f64,
     },
-    /// UART line.
+    /// UART line. The decoder follows rate changes; `baud` is the starting
+    /// point (0: detect from the traffic).
     Uart {
-        /// Detected or configured baud rate.
+        /// Detected or configured baud rate, 0 for automatic.
         baud: u32,
     },
     /// I2C clock; `sda` is the paired data channel.
@@ -40,11 +41,17 @@ pub enum Role {
     SpiClk,
     /// SPI chip select.
     SpiCs,
-    /// SPI data line sampled by `clk`.
+    /// SPI data line sampled by `clk` (direction unknown; auto-detected).
     SpiData {
         /// Clock channel.
         clk: u8,
     },
+    /// SPI controller-out data (MOSI / DI).
+    SpiMosi,
+    /// SPI controller-in data (MISO / DO).
+    SpiMiso,
+    /// SPI data/command select (D/C, high = data), e.g. SSD1306 displays.
+    SpiDc,
     /// Generic activity that matched nothing else.
     Data,
 }
@@ -55,12 +62,16 @@ impl fmt::Display for Role {
             Role::Unknown => write!(f, "?"),
             Role::Idle => write!(f, "idle"),
             Role::Clock { hz } => write!(f, "clock {}", fmt_hz(*hz)),
+            Role::Uart { baud: 0 } => write!(f, "UART auto"),
             Role::Uart { baud } => write!(f, "UART {baud}"),
             Role::I2cScl { sda } => write!(f, "I2C SCL (sda=ch{sda})"),
             Role::I2cSda { scl } => write!(f, "I2C SDA (scl=ch{scl})"),
             Role::SpiClk => write!(f, "SPI CLK"),
             Role::SpiCs => write!(f, "SPI CS"),
             Role::SpiData { clk } => write!(f, "SPI data (clk=ch{clk})"),
+            Role::SpiMosi => write!(f, "SPI MOSI"),
+            Role::SpiMiso => write!(f, "SPI MISO"),
+            Role::SpiDc => write!(f, "SPI D/C"),
             Role::Data => write!(f, "data"),
         }
     }
@@ -199,7 +210,8 @@ fn uart_score(c: &ChannelStats, samplerate: u64) -> Option<Suggestion> {
         let r = (x as f64 / unit).round();
         if (1.0..=10.0).contains(&r) && (x as f64 / unit - r).abs() < 0.2 { (s + x as f64, b + r) } else { (s, b) }
     });
-    let baud = snap_baud(samplerate as f64 * bits / sum)?;
+    let measured = samplerate as f64 * bits / sum;
+    let baud = snap_baud(measured).unwrap_or_else(|| crate::decode::uart::nice_baud(measured));
     (fit > 0.85).then_some(Suggestion { role: Role::Uart { baud }, confidence: fit * 0.9 })
 }
 
@@ -320,4 +332,31 @@ pub fn detect(stats: &Stats, corr: &Correlator, samplerate: u64) -> Vec<Suggesti
         }
     }
     out
+}
+
+impl Role {
+    /// Parses a role name as used on the command line: `uart`, `uart:115200`,
+    /// `spi-clk`, `spi-mosi`, `spi-miso`, `spi-cs`, `spi-dc`, `i2c-scl:SDA`,
+    /// `i2c-sda:SCL`, `idle`.
+    pub fn parse(s: &str) -> Result<Role, String> {
+        let (name, arg) = match s.split_once(':') {
+            Some((n, a)) => (n, Some(a)),
+            None => (s, None),
+        };
+        let num = |a: Option<&str>| -> Result<u32, String> {
+            a.ok_or_else(|| format!("{name} needs an argument"))?.parse().map_err(|_| format!("bad number in {s:?}"))
+        };
+        Ok(match name.to_ascii_lowercase().as_str() {
+            "uart" | "serial" => Role::Uart { baud: if arg.is_some() { num(arg)? } else { 0 } },
+            "spi-clk" | "spi-sclk" | "sclk" | "sck" => Role::SpiClk,
+            "spi-mosi" | "spi-di" | "mosi" | "sdi" => Role::SpiMosi,
+            "spi-miso" | "spi-do" | "miso" | "sdo" => Role::SpiMiso,
+            "spi-cs" | "cs" | "ss" => Role::SpiCs,
+            "spi-dc" | "spi-cd" | "dc" | "cd" => Role::SpiDc,
+            "i2c-scl" | "scl" => Role::I2cScl { sda: num(arg)? as u8 },
+            "i2c-sda" | "sda" => Role::I2cSda { scl: num(arg)? as u8 },
+            "idle" | "none" => Role::Idle,
+            _ => return Err(format!("unknown role {name:?}")),
+        })
+    }
 }

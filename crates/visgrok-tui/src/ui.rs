@@ -7,9 +7,10 @@ use ratatui::crossterm::event::{self, Event as TermEvent, KeyCode, KeyEventKind,
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState};
+use ratatui::widgets::{Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState};
 use ratatui::{DefaultTerminal, Frame};
-use visgrok::analyzer::Analyzer;
+use visgrok::analyzer::{Analyzer, SpiProtocol};
+use visgrok::decode::DisplayView;
 use visgrok::roles::{BAUD_RATES, Role, Suggestion, fmt_hz};
 
 use crate::pipeline::{Pipeline, format_annotation};
@@ -30,6 +31,54 @@ struct Ui {
     auto: bool,
     auto_applied: bool,
     message: Option<(String, Instant)>,
+    /// Role picker for the selected channel, when open.
+    picker: Option<ListState>,
+}
+
+/// Roles offered by the picker.
+const PICKS: &[&str] = &[
+    "(none)",
+    "UART (auto baud, follows rate changes)",
+    "SPI SCLK",
+    "SPI MOSI / DI",
+    "SPI MISO / DO",
+    "SPI CS",
+    "SPI D/C (data/command)",
+    "I2C SCL",
+    "I2C SDA",
+    "idle (ignore)",
+];
+
+fn pick_role(i: usize, ch: usize, roles: &[Option<Role>]) -> Option<Role> {
+    let find = |f: &dyn Fn(&Role) -> bool| roles.iter().enumerate().find(|(j, r)| *j != ch && r.as_ref().is_some_and(f)).map(|(j, _)| j);
+    match i {
+        1 => Some(Role::Uart { baud: 0 }),
+        2 => Some(Role::SpiClk),
+        3 => Some(Role::SpiMosi),
+        4 => Some(Role::SpiMiso),
+        5 => Some(Role::SpiCs),
+        6 => Some(Role::SpiDc),
+        7 => {
+            let sda = find(&|r| matches!(r, Role::I2cSda { .. })).unwrap_or(ch + 1);
+            Some(Role::I2cScl { sda: sda as u8 })
+        }
+        8 => {
+            let scl = find(&|r| matches!(r, Role::I2cScl { .. })).unwrap_or(ch.saturating_sub(1));
+            Some(Role::I2cSda { scl: scl as u8 })
+        }
+        9 => Some(Role::Idle),
+        _ => None,
+    }
+}
+
+/// Keeps I2C pairs pointing at each other after an assignment.
+fn fix_i2c_pairs(roles: &mut [Option<Role>]) {
+    let scl = roles.iter().position(|r| matches!(r, Some(Role::I2cScl { .. })));
+    let sda = roles.iter().position(|r| matches!(r, Some(Role::I2cSda { .. })));
+    if let (Some(c), Some(d)) = (scl, sda) {
+        roles[c] = Some(Role::I2cScl { sda: d as u8 });
+        roles[d] = Some(Role::I2cSda { scl: c as u8 });
+    }
 }
 
 /// Everything needed to draw one frame, copied out of the analyzer so the
@@ -43,6 +92,7 @@ struct Snapshot {
     wave: Vec<visgrok::Transition>,
     log: Vec<String>,
     gaps: u64,
+    display: Option<DisplayView>,
 }
 
 #[derive(Clone)]
@@ -79,6 +129,7 @@ fn snapshot(a: &Analyzer, window: u64) -> Snapshot {
         wave,
         log: a.annotations.iter().skip(skip).map(|t| format_annotation(t, &names, a.samplerate())).collect(),
         gaps: a.gaps,
+        display: a.decoders().iter().find_map(|d| d.display()),
     }
 }
 
@@ -103,6 +154,7 @@ fn event_loop(term: &mut DefaultTerminal, pipe: &Pipeline, auto: bool) -> io::Re
         auto,
         auto_applied: false,
         message: None,
+        picker: None,
     };
     loop {
         if ui.auto && !ui.auto_applied && pipe.seconds() >= 2.0 {
@@ -132,7 +184,58 @@ fn event_loop(term: &mut DefaultTerminal, pipe: &Pipeline, auto: bool) -> io::Re
             continue;
         }
         let sel = ui.table.selected().unwrap_or(0);
+        if let Some(p) = &mut ui.picker {
+            let i = p.selected().unwrap_or(0);
+            match k.code {
+                KeyCode::Down | KeyCode::Char('j') => p.select(Some((i + 1).min(PICKS.len() - 1))),
+                KeyCode::Up | KeyCode::Char('k') => p.select(Some(i.saturating_sub(1))),
+                KeyCode::Enter => {
+                    {
+                        let mut roles = pipe.roles.lock().unwrap();
+                        let role = pick_role(i, sel, &roles);
+                        roles[sel] = role;
+                        fix_i2c_pairs(&mut roles);
+                    }
+                    pipe.rebuild_decoders();
+                    ui.flash(&format!("D{sel}: {}", PICKS[i]));
+                    ui.picker = None;
+                }
+                KeyCode::Esc | KeyCode::Char('q') => ui.picker = None,
+                _ => {}
+            }
+            continue;
+        }
         match k.code {
+            KeyCode::Enter => ui.picker = Some(ListState::default().with_selected(Some(0))),
+            KeyCode::Char('p') => {
+                let next = {
+                    let mut o = pipe.options.lock().unwrap();
+                    o.spi_protocol = match o.spi_protocol {
+                        SpiProtocol::Raw => SpiProtocol::Ssd1306 { width: 128, height: 64 },
+                        SpiProtocol::Ssd1306 { height: 64, .. } => SpiProtocol::Ssd1306 { width: 128, height: 32 },
+                        SpiProtocol::Ssd1306 { .. } => SpiProtocol::Raw,
+                    };
+                    o.spi_protocol
+                };
+                pipe.rebuild_decoders();
+                ui.flash(&format!("SPI protocol: {next:?}"));
+            }
+            KeyCode::Char('m') => {
+                let next = {
+                    let mut o = pipe.options.lock().unwrap();
+                    o.spi_mode = match o.spi_mode {
+                        None => Some(0),
+                        Some(3) => None,
+                        Some(m) => Some(m + 1),
+                    };
+                    o.spi_mode
+                };
+                pipe.rebuild_decoders();
+                ui.flash(&match next {
+                    Some(m) => format!("SPI mode {m}"),
+                    None => "SPI mode auto (CPOL from idle clock)".into(),
+                });
+            }
             KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
             KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => return Ok(()),
             KeyCode::Down | KeyCode::Char('j') => ui.table.select(Some((sel + 1).min(n - 1))),
@@ -163,16 +266,16 @@ fn event_loop(term: &mut DefaultTerminal, pipe: &Pipeline, auto: bool) -> io::Re
                 let cur = pipe.roles.lock().unwrap()[sel].clone();
                 let baud = match cur {
                     Some(Role::Uart { baud }) => {
-                        let i = BAUD_RATES.iter().position(|&b| b == baud).unwrap_or(0);
-                        BAUD_RATES[(i + 1) % BAUD_RATES.len()]
+                        match BAUD_RATES.iter().position(|&b| b == baud) {
+                            Some(i) if i + 1 < BAUD_RATES.len() => BAUD_RATES[i + 1],
+                            Some(_) => 0,
+                            None => BAUD_RATES[0],
+                        }
                     }
-                    _ => match snap.suggestions.get(sel).map(|s| &s.role) {
-                        Some(Role::Uart { baud }) => *baud,
-                        _ => 115_200,
-                    },
+                    _ => 0,
                 };
                 set_role(pipe, sel, Some(Role::Uart { baud }));
-                ui.flash(&format!("ch{sel}: UART {baud}"));
+                ui.flash(&if baud == 0 { format!("ch{sel}: UART auto baud") } else { format!("ch{sel}: UART starting at {baud}") });
             }
             KeyCode::Char('i') if sel + 1 < n => {
                 {
@@ -182,17 +285,6 @@ fn event_loop(term: &mut DefaultTerminal, pipe: &Pipeline, auto: bool) -> io::Re
                 }
                 pipe.rebuild_decoders();
                 ui.flash(&format!("I2C: SCL=ch{sel} SDA=ch{}", sel + 1));
-            }
-            KeyCode::Char('s') if sel + 3 < n => {
-                {
-                    let mut r = pipe.roles.lock().unwrap();
-                    r[sel] = Some(Role::SpiClk);
-                    r[sel + 1] = Some(Role::SpiData { clk: sel as u8 });
-                    r[sel + 2] = Some(Role::SpiData { clk: sel as u8 });
-                    r[sel + 3] = Some(Role::SpiCs);
-                }
-                pipe.rebuild_decoders();
-                ui.flash(&format!("SPI: CLK/MOSI/MISO/CS = ch{}..ch{}", sel, sel + 3));
             }
             KeyCode::Char('r') => {
                 pipe.analyzer.lock().unwrap().reset_stats();
@@ -216,14 +308,24 @@ impl Ui {
 
 fn draw(f: &mut Frame, pipe: &Pipeline, ui: &mut Ui, snap: &Snapshot) {
     let n = pipe.info.channels as u16;
-    let [header, middle, wave, log, help] = Layout::vertical([
+    let disp_rows = snap.display.as_ref().map_or(0, |d| d.height.div_ceil(4) as u16 + 2);
+    let [header, middle, wave, bottom, help] = Layout::vertical([
         Constraint::Length(3),
         Constraint::Length(n + 3),
         Constraint::Length(n + 2),
-        Constraint::Min(4),
+        Constraint::Min(4.max(disp_rows)),
         Constraint::Length(1),
     ])
     .areas(f.area());
+    let log = match &snap.display {
+        Some(d) => {
+            let w = d.width.div_ceil(2) as u16 + 2;
+            let [log, panel] = Layout::horizontal([Constraint::Min(20), Constraint::Length(w)]).areas(bottom);
+            draw_display(f, panel, d);
+            log
+        }
+        None => bottom,
+    };
 
     draw_header(f, header, pipe, ui, snap);
     draw_channels(f, middle, pipe, ui, snap);
@@ -241,7 +343,7 @@ fn draw(f: &mut Frame, pipe: &Pipeline, ui: &mut Ui, snap: &Snapshot) {
     f.render_widget(Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(title)), log);
 
     let mut help_spans = vec![Span::styled(
-        " q quit  ↑↓ select  a auto-assign all  A accept selected  u UART/baud  i I2C(sel,sel+1)  s SPI(sel..sel+3)  x clear  +/- zoom  space pause  r reset stats",
+        " q quit  ↑↓ select  ⏎ set role  a auto-assign all  A accept  u UART  i I2C  x clear  p SPI proto  m SPI mode  +/- zoom  space pause  r reset",
         Style::default().fg(Color::DarkGray),
     )];
     if let Some((m, at)) = &ui.message
@@ -250,6 +352,48 @@ fn draw(f: &mut Frame, pipe: &Pipeline, ui: &mut Ui, snap: &Snapshot) {
         help_spans = vec![Span::styled(format!(" {m}"), Style::default().fg(Color::Yellow))];
     }
     f.render_widget(Paragraph::new(Line::from(help_spans)), help);
+
+    if let Some(p) = &mut ui.picker {
+        let sel = ui.table.selected().unwrap_or(0);
+        let area = f.area();
+        let w = 46.min(area.width);
+        let h = (PICKS.len() as u16 + 2).min(area.height);
+        let r = Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h };
+        let items: Vec<ListItem> = PICKS.iter().map(|s| ListItem::new(*s)).collect();
+        let list = List::new(items)
+            .block(Block::default().borders(Borders::ALL).title(format!(" Role for D{sel} ")))
+            .highlight_style(Style::default().bg(Color::Blue).add_modifier(Modifier::BOLD));
+        f.render_widget(Clear, r);
+        f.render_stateful_widget(list, r, p);
+    }
+}
+
+/// Renders a reconstructed display with braille dots (2×4 pixels per cell).
+fn draw_display(f: &mut Frame, area: Rect, d: &DisplayView) {
+    let title = format!(" {} {}×{} {} · {} updates ", d.title, d.width, d.height, if d.on { "on" } else { "off" }, d.updates);
+    let block = Block::default().borders(Borders::ALL).title(title);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    const BITS: [[u32; 4]; 2] = [[0x01, 0x02, 0x04, 0x40], [0x08, 0x10, 0x20, 0x80]];
+    let mut lines = Vec::new();
+    for cy in 0..d.height.div_ceil(4).min(inner.height as usize) {
+        let mut row = String::new();
+        for cx in 0..d.width.div_ceil(2).min(inner.width as usize) {
+            let mut v = 0;
+            for (dx, col) in BITS.iter().enumerate() {
+                for (dy, bit) in col.iter().enumerate() {
+                    let (x, y) = (cx * 2 + dx, cy * 4 + dy);
+                    if x < d.width && y < d.height && d.pixels[y * d.width + x] {
+                        v |= bit;
+                    }
+                }
+            }
+            row.push(char::from_u32(0x2800 + v).unwrap_or(' '));
+        }
+        lines.push(Line::raw(row));
+    }
+    let color = if d.on { Color::Cyan } else { Color::DarkGray };
+    f.render_widget(Paragraph::new(lines).style(Style::default().fg(color)), inner);
 }
 
 fn draw_header(f: &mut Frame, area: Rect, pipe: &Pipeline, ui: &Ui, snap: &Snapshot) {
@@ -430,7 +574,7 @@ mod tests {
     /// `--nocapture` to eyeball the layout.
     #[test]
     fn renders_demo() {
-        let pipe = Pipeline::start(Box::new(Synth::new(20_000_000, Some(20_000_000))), None, Vec::new()).unwrap();
+        let pipe = Pipeline::start(Box::new(Synth::new(20_000_000, Some(20_000_000))), None, Vec::new(), Vec::new(), Default::default()).unwrap();
         while !pipe.finished() {
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -448,6 +592,7 @@ mod tests {
             auto: false,
             auto_applied: false,
             message: None,
+            picker: None,
         };
         let snap = snapshot(&pipe.analyzer.lock().unwrap(), ui.zoom);
         let mut term = Terminal::new(TestBackend::new(150, 40)).unwrap();
@@ -462,5 +607,45 @@ mod tests {
         }
         println!("{out}");
         assert!(out.contains("UART 115200"));
+    }
+
+    #[test]
+    fn renders_device_demo_with_oled() {
+        use visgrok::analyzer::{DecoderOptions, SpiProtocol};
+        let roles = vec![Some(Role::Uart { baud: 0 }), Some(Role::SpiClk), Some(Role::SpiMosi), Some(Role::SpiDc), Some(Role::SpiCs)];
+        let opts = DecoderOptions { spi_protocol: SpiProtocol::Ssd1306 { width: 128, height: 64 }, ..Default::default() };
+        let pipe = Pipeline::start(Box::new(Synth::device(50_000_000, Some(15_000_000))), None, Vec::new(), roles, opts).unwrap();
+        while !pipe.finished() {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        pipe.join();
+        let n = pipe.info.channels;
+        let mut ui = Ui {
+            table: TableState::default().with_selected(Some(0)),
+            zoom: 50_000,
+            paused: false,
+            frozen: None,
+            last_edges: vec![0; n],
+            edge_rate: vec![0.0; n],
+            last_rate_at: Instant::now(),
+            auto: false,
+            auto_applied: false,
+            message: None,
+            picker: None,
+        };
+        let snap = snapshot(&pipe.analyzer.lock().unwrap(), ui.zoom);
+        let mut term = Terminal::new(TestBackend::new(160, 48)).unwrap();
+        term.draw(|f| draw(f, &pipe, &mut ui, &snap)).unwrap();
+        let buf = term.backend().buffer();
+        let mut out = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        println!("{out}");
+        assert!(out.contains("SSD1306 128×64 on"), "{out}");
+        assert!(out.contains("baud rate"), "{out}");
     }
 }

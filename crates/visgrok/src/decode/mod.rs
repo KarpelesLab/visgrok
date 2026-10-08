@@ -2,6 +2,7 @@
 
 pub mod i2c;
 pub mod spi;
+pub mod ssd1306;
 pub mod uart;
 
 use crate::edges::Transition;
@@ -31,6 +32,11 @@ pub enum Event {
     },
     /// UART line held low for a whole frame or longer.
     UartBreak,
+    /// The UART decoder locked onto (or switched to) a baud rate.
+    UartBaud {
+        /// New rate in bits per second.
+        baud: u32,
+    },
     /// I2C start or repeated start.
     I2cStart,
     /// I2C stop.
@@ -59,6 +65,15 @@ pub enum Event {
         mosi: Option<u32>,
         /// Word clocked on MISO, if assigned.
         miso: Option<u32>,
+        /// Level of the D/C line at the last bit, if assigned (true = data).
+        dc: Option<bool>,
+    },
+    /// A message from a higher-level protocol decoder (e.g. SSD1306).
+    Protocol {
+        /// Protocol name.
+        proto: &'static str,
+        /// Human-readable description.
+        text: String,
     },
 }
 
@@ -75,4 +90,25 @@ pub trait Decoder: Send {
     /// Signals that no transition happens before sample `to`; lets decoders
     /// complete frames that end without a following edge.
     fn advance(&mut self, _to: u64, _out: &mut Vec<Annotation>) {}
+    /// A picture of a display this decoder reconstructs, if any.
+    fn display(&self) -> Option<DisplayView> {
+        None
+    }
+}
+
+/// A monochrome display reconstructed by a decoder.
+#[derive(Clone, Debug)]
+pub struct DisplayView {
+    /// Controller name.
+    pub title: &'static str,
+    /// Width in pixels.
+    pub width: usize,
+    /// Height in pixels.
+    pub height: usize,
+    /// Row-major pixels, true = lit.
+    pub pixels: Vec<bool>,
+    /// Panel switched on.
+    pub on: bool,
+    /// Number of RAM write bursts seen.
+    pub updates: u64,
 }

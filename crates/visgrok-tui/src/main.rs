@@ -9,7 +9,8 @@ use std::time::Duration;
 
 use clap::Parser;
 use visgrok::Source;
-use visgrok::roles::fmt_hz;
+use visgrok::analyzer::{DecoderOptions, SpiProtocol};
+use visgrok::roles::{Role, fmt_hz};
 use visgrok::slogic::{Config, Pattern, SLogic};
 use visgrok::synth::Synth;
 use visgrok::vgk::VgkReader;
@@ -49,15 +50,34 @@ pub struct Args {
     /// Stop after this many seconds.
     #[arg(short, long)]
     duration: Option<f64>,
-    /// Use a synthetic signal generator instead of hardware.
-    #[arg(long)]
-    demo: bool,
+    /// Use a synthetic signal generator instead of hardware: `bus` (clock,
+    /// UART, I2C, SPI) or `device` (UART negotiating 21.5k→2M baud on D0,
+    /// SSD1306 OLED on D1 SCLK, D2 MOSI, D3 D/C, D4 CS).
+    #[arg(long, num_args = 0..=1, default_missing_value = "bus", value_name = "SCENARIO")]
+    demo: Option<String>,
     /// No TUI: print a status line every second.
     #[arg(long)]
     headless: bool,
     /// Apply auto-detected channel roles (and start decoders) automatically.
     #[arg(long)]
     auto: bool,
+    /// Assign a channel role, e.g. `--role 0=uart`, `--role 1=uart:115200`,
+    /// `--role 2=spi-clk --role 3=spi-mosi --role 4=spi-dc --role 5=spi-cs`,
+    /// `--role 6=i2c-scl:7 --role 7=i2c-sda:6`. Repeatable.
+    #[arg(short, long = "role", value_name = "CH=ROLE")]
+    roles: Vec<String>,
+    /// SPI mode 0..3 (default: clock polarity from its idle level, CPHA 0).
+    #[arg(long)]
+    spi_mode: Option<u8>,
+    /// SPI chip select is active high.
+    #[arg(long)]
+    spi_cs_high: bool,
+    /// Protocol on top of SPI: raw, ssd1306, ssd1306:128x32.
+    #[arg(long, default_value = "raw", value_parser = SpiProtocol::parse)]
+    spi_proto: SpiProtocol,
+    /// Keep UART rates given with --role fixed instead of following changes.
+    #[arg(long)]
+    uart_fixed: bool,
 }
 
 /// Parses `20M`, `1.5G`, `400k` or a plain number of Hz.
@@ -79,9 +99,18 @@ fn open_source(args: &Args) -> Result<Box<dyn Source>, String> {
         let r = VgkReader::open(p).map_err(|e| format!("{}: {e}", p.display()))?;
         return Ok(Box::new(r));
     }
-    if args.demo {
-        let rate = args.samplerate.unwrap_or(20_000_000);
-        return Ok(Box::new(Synth::new(rate, limit(rate))));
+    if let Some(scenario) = &args.demo {
+        return match scenario.as_str() {
+            "bus" => {
+                let rate = args.samplerate.unwrap_or(20_000_000);
+                Ok(Box::new(Synth::new(rate, limit(rate))))
+            }
+            "device" => {
+                let rate = args.samplerate.unwrap_or(50_000_000);
+                Ok(Box::new(Synth::device(rate, limit(rate))))
+            }
+            other => Err(format!("unknown demo scenario {other:?} (bus, device)")),
+        };
     }
     let dev = SLogic::open(args.serial.as_deref()).map_err(|e| e.to_string())?;
     let rate = args.samplerate.unwrap_or_else(|| dev.model().max_samplerate(args.channels));
@@ -128,7 +157,35 @@ fn main() {
     if args.emulation {
         extra.push(("pattern".to_string(), "emulation".to_string()));
     }
-    let pipe = match Pipeline::start(source, args.output.clone(), extra) {
+    let mut roles: Vec<Option<Role>> = Vec::new();
+    for spec in &args.roles {
+        let parsed = spec
+            .split_once('=')
+            .ok_or_else(|| format!("--role {spec:?}: expected CH=ROLE"))
+            .and_then(|(ch, r)| {
+                let ch: usize = ch.trim_start_matches(['D', 'd']).parse().map_err(|_| format!("bad channel in {spec:?}"))?;
+                Ok((ch, Role::parse(r)?))
+            });
+        match parsed {
+            Ok((ch, role)) => {
+                if roles.len() <= ch {
+                    roles.resize(ch + 1, None);
+                }
+                roles[ch] = Some(role);
+            }
+            Err(e) => {
+                eprintln!("visgrok: {e}");
+                std::process::exit(2);
+            }
+        }
+    }
+    let options = DecoderOptions {
+        spi_mode: args.spi_mode,
+        spi_cs_active_high: args.spi_cs_high,
+        spi_protocol: args.spi_proto,
+        uart_auto: !args.uart_fixed,
+    };
+    let pipe = match Pipeline::start(source, args.output.clone(), extra, roles, options) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("visgrok: {e}");
@@ -150,8 +207,15 @@ fn main() {
 fn headless(pipe: &Pipeline, auto: bool) -> std::io::Result<()> {
     let mut applied = false;
     let mut next_status = 1.0;
-    while !pipe.finished() {
+    loop {
+        let finished = pipe.finished();
         std::thread::sleep(Duration::from_millis(100));
+        for line in pipe.drain_log() {
+            println!("{line}");
+        }
+        if finished {
+            break;
+        }
         if pipe.seconds() < next_status {
             continue;
         }
@@ -164,9 +228,6 @@ fn headless(pipe: &Pipeline, auto: bool) -> std::io::Result<()> {
             }
         }
         eprintln!("{}", pipe.status_line());
-        for line in pipe.drain_log() {
-            println!("{line}");
-        }
     }
     Ok(())
 }

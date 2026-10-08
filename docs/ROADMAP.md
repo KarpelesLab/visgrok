@@ -18,6 +18,13 @@ Status legend: ✅ done · 🚧 in progress · ⬜ planned
 - ✅ Role auto-detection: idle, free-running clock, UART (with baud snapping),
   I2C SCL/SDA pairing, SPI clock/data/CS grouping.
 - ✅ Streaming decoders: UART (5–9 bits, parity, break), I2C, SPI (modes 0–3).
+- ✅ UART automatic baud detection without snapping to standard rates, following
+  rate changes in both directions (retroactive re-decode of the frame where the
+  rate changed): e.g. 21.5 kbaud → 2 Mbaud negotiation.
+- ✅ SPI with D/C line, CPOL inferred from the idle clock, word resync on clock
+  pauses without CS; SSD1306 layer: full command decoding, RAM pointer tracking
+  in all addressing modes, live framebuffer rendered in the TUI (braille).
+- ✅ `--demo device`: synthetic UART negotiation + SSD1306 for testing.
 - ✅ Streaming sigrok `.sr` writer (stored zip, Zip64 for large captures),
   verified with `sigrok-cli`.
 - ✅ Synthetic source for development without hardware.
@@ -50,7 +57,7 @@ Status legend: ✅ done · 🚧 in progress · ⬜ planned
 - ✅ Acquisition / writer / analysis threads; the writer is lossless (back-pressure),
   analysis skips blocks when behind and says so.
 - ✅ Live channel table (level, edges, frequency, duty, min pulse, role).
-- ✅ Role assignment: auto-apply, accept per channel, manual UART/I2C/SPI.
+- ✅ Role assignment: auto-apply, accept per channel, role picker, `--role CH=ROLE`.
 - ✅ Waveform view with zoom, pause; decoded event log; headless mode.
 - ✅ Device options in the CLI (`--channels`, `--threshold`, `--serial`, `--list`, `--emulation`).
 - ⬜ Triggers (start recording on a condition) and pre-trigger ring buffer.

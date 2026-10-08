@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
-use visgrok::analyzer::{Analyzer, Tagged};
+use visgrok::analyzer::{Analyzer, DecoderOptions, Tagged};
 use visgrok::decode::Event;
 use visgrok::roles::Role;
 use visgrok::srzip::SrZipWriter;
@@ -28,6 +28,8 @@ pub struct Pipeline {
     pub analyzer: Mutex<Analyzer>,
     /// User-assigned roles; `None` means "not assigned".
     pub roles: Mutex<Vec<Option<Role>>>,
+    /// Decoder settings (SPI mode/protocol, UART auto-baud).
+    pub options: Mutex<DecoderOptions>,
     samples: AtomicU64,
     blocks_skipped: AtomicU64,
     written: AtomicU64,
@@ -50,15 +52,20 @@ impl Pipeline {
         source: Box<dyn Source>,
         output: Option<PathBuf>,
         extra: Vec<(String, String)>,
+        roles: Vec<Option<Role>>,
+        options: DecoderOptions,
     ) -> Result<Arc<Pipeline>, String> {
         let info = source.info();
+        let mut roles = roles;
+        roles.resize(info.channels, None);
         let writer = match &output {
             Some(p) => Some(Recorder::create(p, &info, extra).map_err(|e| format!("{}: {e}", p.display()))?),
             None => None,
         };
         let pipe = Pipeline {
             analyzer: Mutex::new(Analyzer::new(info.channels, info.samplerate)),
-            roles: Mutex::new(vec![None; info.channels]),
+            roles: Mutex::new(roles),
+            options: Mutex::new(options),
             info,
             output,
             samples: AtomicU64::new(0),
@@ -72,6 +79,7 @@ impl Pipeline {
             log_seen: AtomicU64::new(0),
             threads: Mutex::new(Vec::new()),
         };
+        pipe.rebuild_decoders();
         let shared = Arc::new(pipe);
         let (wtx, wrx) = sync_channel::<Arc<Block>>(1024);
         let (atx, arx) = sync_channel::<Arc<Block>>(4);
@@ -239,7 +247,8 @@ impl Pipeline {
     pub fn rebuild_decoders(&self) {
         let roles = self.effective_roles();
         let mut a = self.analyzer.lock().unwrap();
-        let d = a.decoders_for_roles(&roles);
+        let opts = self.options.lock().unwrap().clone();
+        let d = a.decoders_for_roles(&roles, &opts);
         a.set_decoders(d);
         self.log_seen.store(a.annotation_count, Ordering::Relaxed);
     }
@@ -277,14 +286,16 @@ impl Pipeline {
     pub fn drain_log(&self) -> Vec<String> {
         let a = self.analyzer.lock().unwrap();
         let seen = self.log_seen.swap(a.annotation_count, Ordering::Relaxed);
-        let new = (a.annotation_count - seen).min(a.annotations.len() as u64) as usize;
+        let pending = a.annotation_count - seen;
+        let new = pending.min(a.annotations.len() as u64) as usize;
         let skip = a.annotations.len() - new;
         let names: Vec<String> = a.decoders().iter().map(|d| d.name()).collect();
-        a.annotations
-            .iter()
-            .skip(skip)
-            .map(|t| format_annotation(t, &names, a.samplerate()))
-            .collect()
+        let mut out = Vec::with_capacity(new + 1);
+        if pending > new as u64 {
+            out.push(format!("[{} decoded events not shown: log history overflowed]", pending - new as u64));
+        }
+        out.extend(a.annotations.iter().skip(skip).map(|t| format_annotation(t, &names, a.samplerate())));
+        out
     }
 }
 
@@ -321,10 +332,16 @@ pub fn format_event(e: &Event) -> String {
         Event::I2cData { value, ack } => format!("data {value:02x} {}", if *ack { "ACK" } else { "NAK" }),
         Event::SpiSelect(true) => "CS asserted".into(),
         Event::SpiSelect(false) => "CS released".into(),
-        Event::SpiWord { mosi, miso } => {
+        Event::SpiWord { mosi, miso, dc } => {
             let f = |v: &Option<u32>| v.map_or("--".to_string(), |v| format!("{v:02x}"));
-            format!("mosi {} miso {}", f(mosi), f(miso))
+            let mut s = format!("mosi {} miso {}", f(mosi), f(miso));
+            if let Some(dc) = dc {
+                s += if *dc { " [data]" } else { " [cmd]" };
+            }
+            s
         }
+        Event::UartBaud { baud } => format!("── baud rate {baud} ──"),
+        Event::Protocol { text, .. } => text.clone(),
     }
 }
 

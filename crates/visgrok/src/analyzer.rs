@@ -6,7 +6,8 @@ use std::collections::VecDeque;
 use crate::block::Block;
 use crate::decode::i2c::I2c;
 use crate::decode::spi::{Spi, SpiConfig};
-use crate::decode::uart::{UartConfig, UartDecoder};
+use crate::decode::ssd1306::Ssd1306;
+use crate::decode::uart::{Uart, UartConfig};
 use crate::decode::{Annotation, Decoder};
 use crate::edges::{EdgeDetector, Transition};
 use crate::roles::{self, Correlator, Role, Suggestion};
@@ -15,7 +16,61 @@ use crate::stats::Stats;
 /// How many recent transitions are kept for waveform display.
 pub const WAVE_HISTORY: usize = 1 << 16;
 /// How many recent annotations are kept.
-pub const ANNOTATION_HISTORY: usize = 4096;
+pub const ANNOTATION_HISTORY: usize = 1 << 16;
+
+/// Higher-level protocol carried over SPI.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpiProtocol {
+    /// Plain SPI words.
+    Raw,
+    /// SSD1306-style OLED controller (commands and display RAM).
+    Ssd1306 {
+        /// Panel width in pixels.
+        width: usize,
+        /// Panel height in pixels.
+        height: usize,
+    },
+}
+
+impl SpiProtocol {
+    /// Parses `raw`, `ssd1306`, `ssd1306:128x32`.
+    pub fn parse(s: &str) -> Result<SpiProtocol, String> {
+        let (name, arg) = s.split_once(':').map_or((s, None), |(n, a)| (n, Some(a)));
+        match name.to_ascii_lowercase().as_str() {
+            "raw" | "spi" | "none" => Ok(SpiProtocol::Raw),
+            "ssd1306" | "sh1106" | "oled" => {
+                let (w, h) = match arg {
+                    Some(a) => {
+                        let (w, h) = a.split_once('x').ok_or("size must look like 128x64")?;
+                        (w.parse().map_err(|_| "bad width")?, h.parse().map_err(|_| "bad height")?)
+                    }
+                    None => (128, 64),
+                };
+                Ok(SpiProtocol::Ssd1306 { width: w, height: h })
+            }
+            _ => Err(format!("unknown SPI protocol {name:?} (raw, ssd1306[:WxH])")),
+        }
+    }
+}
+
+/// Settings applied when building decoders from roles.
+#[derive(Clone, Debug)]
+pub struct DecoderOptions {
+    /// SPI mode (0..=3); `None` infers CPOL from the clock idle level.
+    pub spi_mode: Option<u8>,
+    /// SPI chip select is active high.
+    pub spi_cs_active_high: bool,
+    /// Protocol layered on SPI.
+    pub spi_protocol: SpiProtocol,
+    /// UART decoders follow baud rate changes even when a rate is given.
+    pub uart_auto: bool,
+}
+
+impl Default for DecoderOptions {
+    fn default() -> Self {
+        DecoderOptions { spi_mode: None, spi_cs_active_high: false, spi_protocol: SpiProtocol::Raw, uart_auto: true }
+    }
+}
 
 /// An annotation tagged with the index of the decoder that produced it.
 #[derive(Clone, Debug)]
@@ -105,24 +160,39 @@ impl Analyzer {
     }
 
     /// Builds decoders matching the given per-channel roles.
-    pub fn decoders_for_roles(&self, roles: &[Role]) -> Vec<Box<dyn Decoder>> {
+    pub fn decoders_for_roles(&self, roles: &[Role], opts: &DecoderOptions) -> Vec<Box<dyn Decoder>> {
         let mut out: Vec<Box<dyn Decoder>> = Vec::new();
+        let find = |want: &Role| roles.iter().position(|r| r == want).map(|c| c as u8);
         for (i, r) in roles.iter().enumerate() {
             match r {
                 Role::Uart { baud } => {
-                    out.push(Box::new(UartDecoder::new(UartConfig::new(i as u8, *baud), self.samplerate)))
+                    let mut cfg = UartConfig::auto(i as u8);
+                    cfg.baud = (*baud != 0).then_some(*baud);
+                    cfg.auto = opts.uart_auto || *baud == 0;
+                    out.push(Box::new(Uart::new(cfg, self.samplerate)))
                 }
                 Role::I2cScl { sda } => out.push(Box::new(I2c::new(i as u8, *sda))),
                 Role::SpiClk => {
+                    // Explicit MOSI/MISO roles win; otherwise use auto-detected
+                    // data lines on this clock (first one as MOSI).
                     let data: Vec<u8> = roles
                         .iter()
                         .enumerate()
                         .filter(|(_, r)| matches!(r, Role::SpiData { clk } if *clk as usize == i))
                         .map(|(j, _)| j as u8)
                         .collect();
-                    let cs = roles.iter().position(|r| *r == Role::SpiCs).map(|c| c as u8);
-                    // Without knowing direction, call the first data line MOSI.
-                    out.push(Box::new(Spi::new(SpiConfig::new(i as u8, data.first().copied(), data.get(1).copied(), cs))));
+                    let mosi = find(&Role::SpiMosi).or(data.first().copied());
+                    let miso = find(&Role::SpiMiso).or(data.get(1).copied());
+                    let mut cfg = SpiConfig::new(i as u8, mosi, miso, find(&Role::SpiCs));
+                    cfg.dc = find(&Role::SpiDc);
+                    cfg.mode = opts.spi_mode;
+                    cfg.cs_active_high = opts.spi_cs_active_high;
+                    match opts.spi_protocol {
+                        SpiProtocol::Raw => out.push(Box::new(Spi::new(cfg))),
+                        SpiProtocol::Ssd1306 { width, height } => {
+                            out.push(Box::new(Ssd1306::new(cfg, width, height)))
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -287,7 +357,7 @@ mod tests {
         assert_eq!(s[4].role, Role::Idle);
 
         let roles: Vec<Role> = s.into_iter().map(|s| s.role).collect();
-        let decs = a.decoders_for_roles(&roles);
+        let decs = a.decoders_for_roles(&roles, &DecoderOptions::default());
         assert_eq!(decs.len(), 2);
         let mut a2 = Analyzer::new(8, samplerate);
         a2.set_decoders(decs);
@@ -302,5 +372,64 @@ mod tests {
             .filter(|t| matches!(t.annotation.event, crate::decode::Event::I2cAddress { addr: 0x50, .. }))
             .count();
         assert!(i2c_addr >= 70, "{i2c_addr}");
+    }
+}
+
+#[cfg(test)]
+mod device_tests {
+    use super::*;
+    use crate::decode::Event;
+    use crate::source::Source;
+    use crate::synth::Synth;
+
+    #[test]
+    fn uart_negotiation_and_oled() {
+        let sr = 50_000_000;
+        let mut src = Synth::device(sr, Some(sr / 4)); // 250 ms
+        let mut a = Analyzer::new(8, sr);
+        let roles = vec![
+            Role::Uart { baud: 0 },
+            Role::SpiClk,
+            Role::SpiMosi,
+            Role::SpiDc,
+            Role::SpiCs,
+            Role::Unknown,
+            Role::Unknown,
+            Role::Unknown,
+        ];
+        let opts = DecoderOptions { spi_protocol: SpiProtocol::Ssd1306 { width: 128, height: 64 }, ..Default::default() };
+        let mut text = String::new();
+        let mut bauds = Vec::new();
+        let mut oled = Vec::new();
+        let mut started = false;
+        while let Some(b) = src.next_block().unwrap() {
+            if !started {
+                let d = a.decoders_for_roles(&roles, &opts);
+                a.set_decoders(d);
+                started = true;
+            }
+            let before = a.annotation_count;
+            a.process(&b);
+            let new = (a.annotation_count - before) as usize;
+            for t in a.annotations.iter().skip(a.annotations.len() - new.min(a.annotations.len())) {
+                match &t.annotation.event {
+                    Event::UartByte { value, framing_error: false, .. } => text.push(*value as u8 as char),
+                    Event::UartBaud { baud } => bauds.push(*baud),
+                    Event::Protocol { text, .. } => oled.push(text.clone()),
+                    _ => {}
+                }
+            }
+        }
+        assert!(text.starts_with("AT+BAUD=2000000\r\nOK\r\nfast packet 1.0: the quick brown fox"), "{text:?}");
+        assert!(text.contains("fast packet 1.19: the quick brown fox jumps over the lazy dog\r\n"), "{text:?}");
+        assert_eq!(&bauds[..3], &[21_500, 2_000_000, 21_500], "{bauds:?}");
+        assert_eq!(oled[0], "ae: display OFF");
+        assert!(oled.iter().any(|t| t == "af: display ON"));
+        assert!(oled.iter().filter(|t| t.starts_with("write 1024 bytes at page 0 col 0")).count() >= 5, "{oled:?}");
+        let d = a.decoders()[1].display().unwrap();
+        assert!(d.on);
+        // Border pixels are lit; with A1/C8 (mirrored) the border is still a border.
+        assert!(d.pixels[0] && d.pixels[127] && d.pixels[63 * 128]);
+        assert!(!d.pixels[32 * 128 + 64] || d.pixels.iter().filter(|&&p| p).count() > 300);
     }
 }
