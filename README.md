@@ -26,6 +26,17 @@ cargo build --release
 cargo run --release -p visgrok --example selftest -- 16 100000000 5
 ```
 
+Convert between formats (`.vgk`, `.sr` — stored or deflated, read from
+sigrok/PulseView too — `.vcd`, raw `.bin`) without re-analysis:
+
+```sh
+visgrok convert capture.vgk capture.sr        # for PulseView (deflated)
+visgrok convert pulseview.sr capture.vgk      # sigrok session to visgrok
+visgrok convert capture.vgk capture.vcd       # GTKWave, simulators
+visgrok convert dump.bin capture.vgk -s 100M -c 8   # raw samples need rate + channels
+visgrok --info any.sr                         # per-channel activity summary
+```
+
 Recordings use visgrok's compressed `.vgk` format by default (typically 30× to
 25 000× smaller than raw; see [docs/FORMAT.md](docs/FORMAT.md)). Name the
 output `*.sr` to write a sigrok session for PulseView / `sigrok-cli` directly.

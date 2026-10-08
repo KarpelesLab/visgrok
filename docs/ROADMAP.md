@@ -28,13 +28,22 @@ Status legend: ✅ done · 🚧 in progress · ⬜ planned
 - ✅ SD card bus decoder (CLK/CMD/DAT0-3): commands, R1/R1b/R2/R3/R6/R7
   responses (status flags and state, CID, CSD capacity, OCR), data blocks in
   1-/4-bit mode with CRC16, write CRC status and busy; data expected only after
-  data commands so busy isn't misread. SD-over-SPI not yet.
+  data commands so busy isn't misread; block sizes confirmed by CRC (CMD16 /
+  CMD42 18-byte password blocks); CMD42 payload decoding; clock-relative glitch
+  filter, frame resynchronization and plausibility checks against CMD crosstalk.
+  Verified on a real 20 s head-unit boot capture: all 29,257 blocks CRC-clean.
+  SD-over-SPI not yet.
 - ✅ Streaming sigrok `.sr` writer (stored zip, Zip64 for large captures),
   verified with `sigrok-cli`.
 - ✅ Synthetic source for development without hardware.
 - ✅ Compressed `.vgk` capture format ([FORMAT.md](FORMAT.md)): parallel zstd
   chunks via compcol, stored fallback under load, CRCs, crash-tolerant, index;
   replay (`-i`) and conversion to `.sr`.
+- ✅ Format conversion (`visgrok convert`): `.vgk`, `.sr` (read stored/deflated,
+  write stored/deflated, zip64), `.vcd` (read/write, rate from comment or
+  timestamp GCD), raw `.bin`; verified against sigrok-cli.
+- ✅ GitHub CI: fmt, clippy -D warnings and tests on Linux/Windows/macOS, MSRV
+  1.89, rustdoc -D warnings.
 
 ## Phase 2: SLogic driver
 - ✅ Device discovery (VID/PID table, bootloader detection, serial selection) via `rawusb`.
