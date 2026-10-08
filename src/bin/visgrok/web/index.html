@@ -55,6 +55,7 @@ footer { display: grid; grid-template-columns: 1fr; border-top: 1px solid var(--
 #screen .title button { padding: 0 6px; font-size: 11px; }
 .chan .lvl { position: absolute; right: 120px; font: 11px ui-monospace, Menlo, monospace; color: var(--hi); }
 .chan { position: relative; }
+[hidden] { display: none !important; }
 #tip { position: fixed; z-index: 20; pointer-events: none; max-width: 520px; background: #1b2130; border: 1px solid #34405a; border-radius: 6px; padding: 6px 9px; font: 12px/1.45 ui-monospace, Menlo, monospace; color: #e8eefc; box-shadow: 0 6px 18px rgba(0,0,0,.5); white-space: pre-wrap; }
 #tip .src { color: var(--accent); }
 #modalbg { position: fixed; inset: 0; z-index: 30; background: rgba(5,7,10,.6); display: flex; align-items: center; justify-content: center; }
@@ -64,7 +65,7 @@ footer { display: grid; grid-template-columns: 1fr; border-top: 1px solid var(--
 #modal .lines { font: 12.5px/1.55 ui-monospace, Menlo, monospace; white-space: pre-wrap; background: #0d0f13; border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; margin: 8px 0; }
 #modal .hex { font: 12px/1.45 ui-monospace, Menlo, monospace; white-space: pre; overflow-x: auto; background: #0d0f13; border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; margin: 8px 0; color: #cfd6e4; }
 #modal .hex .off { color: var(--dim); } #modal .hex .asc { color: #9fb7d9; }
-#modal .ctx div { display: grid; grid-template-columns: 110px 1fr; gap: 10px; padding: 1px 6px; cursor: pointer; font: 12px/1.5 ui-monospace, Menlo, monospace; border-radius: 4px; }
+#modal .ctx div { display: grid; grid-template-columns: 120px 1fr; gap: 10px; padding: 1px 6px; cursor: pointer; font: 12px/1.5 ui-monospace, Menlo, monospace; border-radius: 4px; }
 #modal .ctx div:hover { background: #1d2230; }
 #modal .ctx .cur { background: #1d3557; }
 #modal .ctx .t { color: var(--dim); text-align: right; }
@@ -564,11 +565,13 @@ function onEvent(m) {
   const [s, e, ch, src, text, n] = m.ev, sr = st.samplerate;
   modalEv = m; $("tip").hidden = true;
   const chName = (st.chans && st.chans[ch] && st.chans[ch].name) || "D" + ch;
-  const row = (x, cur) => `<div class="${cur ? "cur" : ""}" data-s="${x[0]}" data-c="${x[2]}"><span class="t">${fmtTime(x[0] / sr)}</span><span>${esc(x[4])}</span></div>`;
+  // Neighbours are timed relative to this event.
+  const row = (x, cur) => `<div class="${cur ? "cur" : ""}" data-s="${x[0]}" data-c="${x[2]}"><span class="t">${cur ? fmtTime(s / sr) : (x[0] >= s ? "+" : "") + fmtTime((x[0] - s) / sr)}</span><span>${esc(x[4])}</span></div>`;
   $("modal").innerHTML =
     `<h2>${esc(shortLabel(text))}</h2>` +
     `<div class="meta">${esc(src)} · ${esc(chName)} · at ${fmtTime(s / sr)} (#${s}) · lasts ${fmtTime(Math.max(0, e - s) / sr)}${n ? ` · ${n} bytes` : ""}</div>` +
-    `<div class="lines">${textLines(text).map(esc).join("\n")}</div>` +
+    // The hexdump below replaces the inline preview ("… · 01 10 6d …").
+    `<div class="lines">${textLines(m.data ? text.replace(/ · [0-9a-f]{2}(?: [0-9a-f]{2})*.*$/, "") : text).map(esc).join("\n")}</div>` +
     (m.data ? `<h3>Payload (${m.data.length / 2} bytes)</h3><div class="hex">${hexdump(m.data)}</div>` : "") +
     `<h3>Around it (${esc(shortSrc(src))})</h3><div class="ctx">${m.before.map((x) => row(x)).join("")}${row(m.ev, true)}${m.after.map((x) => row(x)).join("")}</div>` +
     `<div class="bar"><button id="mzoom">Zoom to event</button><button id="mclose">Close (Esc)</button></div>`;
