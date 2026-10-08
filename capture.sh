@@ -3,7 +3,7 @@
 #
 # Wiring:
 #   D0 = 8 MHz clock      D1 = reset
-#   D2 = UART (1-wire, auto baud: 21.5k -> 2M negotiation is followed)
+#   D2 = UART (1-wire, 8E1, auto baud: 21.5k -> 2M negotiation is followed)
 #   D3 = SPI SCLK   D4 = SPI D/C   D5 = SPI CS   D6 = SPI MOSI   (SSD1306 OLED)
 #
 # 8 channels at 200 MHz (200 MB/s, a rate with no USB losses in testing):
@@ -27,7 +27,7 @@ cargo build --release -q -p visgrok-tui
 
 set -- -c 8 -s "$RATE" \
     -n 0=CLK8M -n 1=RESET -n 2=UART -n 3=SCLK -n 4=DC -n 5=CS -n 6=MOSI \
-    -r 2=uart \
+    -r 2=uart --uart-format 8E1 \
     -r 3=spi-clk -r 4=spi-dc -r 5=spi-cs -r 6=spi-mosi --spi-proto ssd1306 \
     "$@"
 [ -n "$OUT" ] && set -- "$@" -o "$OUT"

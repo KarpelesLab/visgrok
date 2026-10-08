@@ -95,6 +95,8 @@ pub struct Uart {
     /// Edges (time, logical level after the edge), from the start of the
     /// first undecoded frame.
     edges: VecDeque<(u64, bool)>,
+    /// Pulses shorter than this many samples are ignored.
+    glitch: u64,
 }
 
 /// Kept for compatibility with the earlier name.
@@ -104,7 +106,10 @@ impl Uart {
     /// Creates a decoder for a stream sampled at `samplerate` Hz.
     pub fn new(cfg: UartConfig, samplerate: u64) -> Uart {
         let bit = cfg.baud.map(|b| samplerate as f64 / b as f64);
-        Uart { cfg, samplerate, bit, edges: VecDeque::new() }
+        // 25 ns: well below a bit at any rate this decoder can follow (4 Mbaud
+        // = 250 ns), well above typical probe glitches.
+        let glitch = (samplerate as f64 * 25e-9) as u64;
+        Uart { cfg, samplerate, bit, edges: VecDeque::new(), glitch }
     }
 
     /// Current baud rate estimate.
@@ -119,13 +124,21 @@ impl Uart {
     /// Estimates the bit time from edges starting at index `from`, using the
     /// first burst only (up to a long idle gap).
     fn estimate(&self, from: usize, settled: bool) -> Option<f64> {
+        self.estimate_burst(from, settled).0
+    }
+
+    /// Like [`Uart::estimate`], also returning how many edges the first burst
+    /// has and whether it is complete (followed by a gap).
+    fn estimate_burst(&self, from: usize, settled: bool) -> (Option<f64>, usize, bool) {
         let mut widths = Vec::new();
         let mut min = u64::MAX;
         let mut prev: Option<u64> = None;
+        let mut complete = false;
         for &(at, _) in self.edges.iter().skip(from) {
             if let Some(p) = prev {
                 let w = at - p;
                 if widths.len() >= 6 && w > 40 * min {
+                    complete = true;
                     break; // gap between bursts
                 }
                 min = min.min(w);
@@ -136,9 +149,10 @@ impl Uart {
             }
             prev = Some(at);
         }
+        let edges = widths.len() + 1;
         // Want enough evidence, unless the burst is over (the line went idle).
-        if widths.len() < if settled { 4 } else { 12 } {
-            return None;
+        if widths.len() < if settled || complete { 4 } else { 12 } {
+            return (None, edges, complete);
         }
         let mut sorted = widths.clone();
         sorted.sort_unstable();
@@ -164,7 +178,7 @@ impl Uart {
                 bits += k;
             }
         }
-        (total >= 4 && fit * 5 >= total * 4).then(|| sum / bits)
+        ((total >= 4 && fit * 5 >= total * 4).then(|| sum / bits), edges, complete)
     }
 
     /// Decodes the frame starting at `edges[i]` with `bit` samples per bit.
@@ -244,7 +258,14 @@ impl Uart {
                 Some(b) => b,
                 None => {
                     let quiet = now.saturating_sub(self.edges.back().unwrap().0) as f64;
-                    let est = self.estimate(0, false).or_else(|| self.estimate(0, true).filter(|&b| quiet > 20.0 * b));
+                    let (first, n, complete) = self.estimate_burst(0, false);
+                    if first.is_none() && complete {
+                        // A burst that fits no bit time (noise, power-up
+                        // glitches): drop it and look at the next one.
+                        self.edges.drain(..n.min(self.edges.len()));
+                        continue;
+                    }
+                    let est = first.or_else(|| self.estimate(0, true).filter(|&b| quiet > 20.0 * b));
                     match est {
                         Some(b) => {
                             self.set_bit(b, t0, out);
@@ -316,6 +337,13 @@ impl Decoder for Uart {
     fn transition(&mut self, t: &Transition, out: &mut Vec<Annotation>) {
         let ch = self.cfg.channel;
         if t.changed() >> ch & 1 == 0 {
+            return;
+        }
+        // Pulses shorter than the glitch limit are noise: cancel them.
+        if let Some(&(at, _)) = self.edges.back()
+            && t.at - at < self.glitch
+        {
+            self.edges.pop_back();
             return;
         }
         self.run(t.at, out);
@@ -391,6 +419,64 @@ mod tests {
         d.advance(end + 100_000, &mut out);
         assert_eq!(bytes_of(&out), b"\x55AT+SPEED?\r\n");
         assert!(out.iter().any(|a| a.event == Event::UartBaud { baud: 21_500 }), "{out:?}");
+    }
+
+    #[test]
+    fn locks_after_power_on_noise_with_parity() {
+        // 200 MHz: a burst of 1-50 sample glitches and odd pulses (like a
+        // supply ramp), then an 8E1 ATR at 21.5 kbaud.
+        let sr = 200_000_000u64;
+        let mut tr = Vec::new();
+        let mut level = 0u16;
+        let mut at = 1000u64;
+        let mut x = 12345u32;
+        for _ in 0..157 {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            at += 1 + (x % 1700) as u64;
+            tr.push(Transition { at, prev: level, now: level ^ 1 });
+            level ^= 1;
+        }
+        if level == 0 {
+            at += 7;
+            tr.push(Transition { at, prev: 0, now: 1 });
+        }
+        let bit = sr as f64 / 21_500.0;
+        let atr = [0x3bu8, 0x1b, 0x87, 0x05, 0x32, 0x2e, 0x35, 0x2e, 0x31, 0x04, 0x33, 0x00, 0x00, 0x04];
+        let mut levels = Vec::new();
+        for &b in &atr {
+            levels.push(false);
+            levels.extend((0..8).map(|k| b >> k & 1 != 0));
+            levels.push(b.count_ones() % 2 == 1); // even parity
+            levels.extend([true, true]); // stop + guard
+        }
+        let start = at + 2_000_000;
+        let mut cur = true;
+        for (i, &l) in levels.iter().enumerate() {
+            if l != cur {
+                tr.push(Transition { at: start + (i as f64 * bit) as u64, prev: cur as u16, now: l as u16 });
+                cur = l;
+            }
+        }
+        let mut cfg = UartConfig::auto(0);
+        cfg.parity = Parity::Even;
+        let mut d = Uart::new(cfg, sr);
+        d.init(0);
+        let mut out = Vec::new();
+        for t in &tr {
+            d.transition(t, &mut out);
+        }
+        d.advance(start + (levels.len() as f64 * bit) as u64 + 10_000_000, &mut out);
+        let got: Vec<u8> = out
+            .iter()
+            .filter(|a| a.start >= start)
+            .filter_map(|a| match a.event {
+                Event::UartByte { value, framing_error: false, parity_error: false } => Some(value as u8),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(got, atr);
     }
 
     #[test]

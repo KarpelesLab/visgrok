@@ -9,7 +9,8 @@ use std::time::Duration;
 
 use clap::Parser;
 use visgrok::Source;
-use visgrok::analyzer::{DecoderOptions, SpiProtocol};
+use visgrok::analyzer::{DecoderOptions, SpiProtocol, parse_uart_format};
+use visgrok::decode::uart::Parity;
 use visgrok::roles::{Role, fmt_hz};
 use visgrok::slogic::{Config, Pattern, SLogic};
 use visgrok::synth::Synth;
@@ -81,6 +82,9 @@ pub struct Args {
     /// Protocol on top of SPI: raw, ssd1306, ssd1306:128x32.
     #[arg(long, default_value = "raw", value_parser = SpiProtocol::parse)]
     spi_proto: SpiProtocol,
+    /// UART frame format: 8N1 (default), 8E1, 8O1, 7E1, ... (ISO 7816 cards: 8E1).
+    #[arg(long, default_value = "8N1", value_parser = parse_uart_format)]
+    uart_format: (u8, Parity),
     /// Keep UART rates given with --role fixed instead of following changes.
     #[arg(long)]
     uart_fixed: bool,
@@ -197,6 +201,8 @@ fn main() {
         spi_cs_active_high: args.spi_cs_high,
         spi_protocol: args.spi_proto,
         uart_auto: !args.uart_fixed,
+        uart_data_bits: args.uart_format.0,
+        uart_parity: args.uart_format.1,
     };
     let mut names: Vec<Option<String>> = Vec::new();
     for spec in &args.names {
