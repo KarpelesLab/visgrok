@@ -162,6 +162,12 @@ dependencies = [
 
 [[package]]
 name = "compcol"
+version = "0.6.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f6f29da98742f258743e8bb44b09f0cc1cbca2591e709b1bb85ccd6e9111f431"
+
+[[package]]
+name = "compcol"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "971c6ed76a2a81874d4d3e398e214df01ed1d2355cdc772bc26f16027c383cea"
@@ -493,6 +499,15 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
+
+[[package]]
+name = "oxideav-png"
+version = "0.1.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86345e5646a75c1104cede933127c3a6c5a6830186ed986892d6f2c8da9a0730"
+dependencies = [
+ "compcol 0.6.11",
+]
 
 [[package]]
 name = "palette"
@@ -911,7 +926,8 @@ name = "visgrok"
 version = "0.1.1"
 dependencies = [
  "clap",
- "compcol",
+ "compcol 0.7.2",
+ "oxideav-png",
  "ratatui",
  "rawusb",
 ]

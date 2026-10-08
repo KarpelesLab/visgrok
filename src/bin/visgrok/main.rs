@@ -2,6 +2,7 @@
 //! write everything to a sigrok `.sr` file and show live analysis in a TUI.
 
 mod pipeline;
+mod query;
 mod ui;
 mod web;
 
@@ -106,6 +107,8 @@ pub struct Args {
 /// Subcommands.
 #[derive(clap::Subcommand, Debug)]
 enum Command {
+    #[command(flatten)]
+    Query(query::Query),
     /// Web control mode: serve a browser UI (capture control, roles,
     /// browsing live and recorded captures) on a local HTTP port.
     Web {
@@ -201,6 +204,10 @@ fn open_source(args: &Args) -> Result<Box<dyn Source>, String> {
 
 fn main() {
     let args = Args::parse();
+    if let Some(Command::Query(q)) = &args.command {
+        query::run(q);
+        return;
+    }
     if let Some(Command::Web { listen, dir, open }) = &args.command {
         let opts = web::WebOptions {
             listen: listen.clone(),

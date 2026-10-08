@@ -16,7 +16,7 @@ exclude = [".github", "capture.sh"]
 default = ["cli"]
 # The `visgrok` binary (terminal UI and command line). Library users can turn
 # it off to skip the TUI dependencies.
-cli = ["dep:clap", "dep:ratatui"]
+cli = ["dep:clap", "dep:ratatui", "dep:oxideav-png"]
 
 [[bin]]
 name = "visgrok"
@@ -30,3 +30,4 @@ compcol = { version = "0.7.2", default-features = false, features = ["alloc", "z
 rawusb = "0.1.6"
 clap = { version = "4.6.7", features = ["derive"], optional = true }
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm", "layout-cache"], optional = true }
+oxideav-png = { version = "0.1.12", default-features = false, optional = true }
