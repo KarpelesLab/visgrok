@@ -47,6 +47,10 @@ const MAX_BACKLOG: usize = 48;
 pub mod kind {
     /// Logic samples.
     pub const SAMPLES: u8 = 1;
+    /// Overview tiles (see [`crate::store`]): `u64` tile size, `u64` count,
+    /// then per tile `u32` state at the tile start and `u32` mask of the
+    /// channels that change within it. Written before the index.
+    pub const OVERVIEW: u8 = 2;
     /// Index of sample chunks.
     pub const INDEX: u8 = 0xfe;
 }
@@ -192,6 +196,10 @@ pub struct VgkWriter<W: Write + Send + 'static> {
     chunk_first: u64,
     /// Encodes chunks; yields (raw length, encoded chunk) in order.
     pool: OrderedPool<Job, (u64, Vec<u8>)>,
+    /// Called (after a flush) for every sample chunk that reaches the file.
+    on_chunk: Option<Box<dyn FnMut(ChunkRef) + Send>>,
+    /// Overview chunk payload to write at `finish`.
+    overview: Option<Vec<u8>>,
     index: Vec<(u64, u64)>,
     raw_written: u64,
     stored_chunks: u64,
@@ -233,6 +241,8 @@ impl<W: Write + Send + 'static> VgkWriter<W> {
             index: Vec::new(),
             raw_written: 0,
             stored_chunks: 0,
+            on_chunk: None,
+            overview: None,
         })
     }
 
@@ -287,14 +297,42 @@ impl<W: Write + Send + 'static> VgkWriter<W> {
         self.pool.submit(Job { first, data, compress });
     }
 
+    /// Registers a callback told about every sample chunk once it is on
+    /// disk (the output is flushed first), so readers can follow a capture
+    /// while it is being written.
+    pub fn set_on_chunk(&mut self, f: impl FnMut(ChunkRef) + Send + 'static) {
+        self.on_chunk = Some(Box::new(f));
+    }
+
+    /// Sets the overview tiles written by [`VgkWriter::finish`].
+    pub fn set_overview(&mut self, tile: u64, tiles: &[crate::store::Tile]) {
+        let mut p = Vec::with_capacity(16 + tiles.len() * 8);
+        p.extend_from_slice(&tile.to_le_bytes());
+        p.extend_from_slice(&(tiles.len() as u64).to_le_bytes());
+        for t in tiles {
+            p.extend_from_slice(&t.first.to_le_bytes());
+            p.extend_from_slice(&t.changed.to_le_bytes());
+        }
+        self.overview = Some(p);
+    }
+
     /// Writes finished chunks in order; with `all`, waits for every one.
     fn collect(&mut self, all: bool) -> io::Result<()> {
         while let Some((raw, bytes)) = self.pool.next(all) {
             let first = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
-            self.index.push((self.pos, first));
+            let offset = self.pos;
+            self.index.push((offset, first));
             self.out.write_all(&bytes)?;
             self.pos += bytes.len() as u64;
             self.raw_written += raw;
+            if let Some(f) = &mut self.on_chunk {
+                self.out.flush()?;
+                f(ChunkRef {
+                    offset,
+                    first,
+                    samples: raw / self.unit_size as u64,
+                });
+            }
         }
         Ok(())
     }
@@ -304,6 +342,19 @@ impl<W: Write + Send + 'static> VgkWriter<W> {
     pub fn finish(mut self) -> io::Result<W> {
         self.submit();
         self.collect(true)?;
+        if let Some(ov) = self.overview.take() {
+            let packed = compress_to_vec_with::<Zstd>(&ov, EncoderConfig { level: 3 })
+                .ok()
+                .filter(|p| p.len() < ov.len());
+            let (codec, payload) = match &packed {
+                Some(p) => (Codec::Zstd, p.as_slice()),
+                None => (Codec::Store, ov.as_slice()),
+            };
+            let h = chunk_header(kind::OVERVIEW, codec, 0, ov.len(), payload.len(), crc32(&ov));
+            self.out.write_all(&h)?;
+            self.out.write_all(payload)?;
+            self.pos += (h.len() + payload.len()) as u64;
+        }
         let mut payload = Vec::with_capacity(self.index.len() * 16);
         for (off, first) in &self.index {
             payload.extend_from_slice(&off.to_le_bytes());
@@ -326,6 +377,137 @@ impl<W: Write + Send + 'static> VgkWriter<W> {
         self.out.flush()?;
         Ok(self.out)
     }
+}
+
+/// Location of a sample chunk in a `.vgk` file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChunkRef {
+    /// File offset of the chunk header.
+    pub offset: u64,
+    /// Index of the chunk's first sample.
+    pub first: u64,
+    /// Number of samples in the chunk.
+    pub samples: u64,
+}
+
+/// Decodes a chunk payload given its header, checking length and CRC.
+fn decode_payload(h: &[u8; CHUNK_HEADER], payload: Vec<u8>) -> io::Result<Vec<u8>> {
+    let first = u64::from_le_bytes(h[8..16].try_into().unwrap());
+    let raw_len = u32::from_le_bytes(h[16..20].try_into().unwrap()) as usize;
+    let crc = u32::from_le_bytes(h[24..28].try_into().unwrap());
+    let raw = match h[5] {
+        0 => payload,
+        1 => decompress_to_vec_capped::<Zstd>(&payload, raw_len as u64).map_err(|e| invalid(format!("chunk at sample {first}: {e:?}")))?,
+        c => return Err(invalid(format!("unknown codec {c}"))),
+    };
+    if raw.len() != raw_len || crc32(&raw) != crc {
+        return Err(invalid(format!("chunk at sample {first}: checksum mismatch")));
+    }
+    Ok(raw)
+}
+
+fn read_header(f: &mut impl Read) -> io::Result<Option<[u8; CHUNK_HEADER]>> {
+    let mut h = [0u8; CHUNK_HEADER];
+    match f.read_exact(&mut h) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(e) => return Err(e),
+    }
+    if &h[..4] != CHUNK_MAGIC || crc32(&h[..28]) != u32::from_le_bytes(h[28..32].try_into().unwrap()) {
+        return Ok(None);
+    }
+    Ok(Some(h))
+}
+
+/// Reads and decodes the sample chunk at `offset` (random access).
+pub fn read_chunk_at(f: &mut File, offset: u64) -> io::Result<Vec<u8>> {
+    f.seek(SeekFrom::Start(offset))?;
+    let h = read_header(f)?.ok_or_else(|| invalid(format!("no chunk at offset {offset}")))?;
+    let stored = u32::from_le_bytes(h[20..24].try_into().unwrap()) as usize;
+    let mut payload = vec![0u8; stored];
+    f.read_exact(&mut payload)?;
+    decode_payload(&h, payload)
+}
+
+/// Structure of a `.vgk` file, found by walking chunk headers (payloads
+/// are skipped, except the overview's).
+#[derive(Clone, Debug)]
+pub struct Scan {
+    /// Capture metadata.
+    pub meta: Meta,
+    /// Sample chunks in order.
+    pub chunks: Vec<ChunkRef>,
+    /// Overview tiles, when the file has them: (tile size, tiles).
+    pub overview: Option<(u64, Vec<crate::store::Tile>)>,
+    /// Total samples in the readable chunks.
+    pub samples: u64,
+    /// The file ended with an index (the capture was closed properly).
+    pub complete: bool,
+}
+
+/// Scans a `.vgk` file's chunk headers.
+pub fn scan(path: impl AsRef<Path>) -> io::Result<Scan> {
+    let mut f = BufReader::with_capacity(1 << 16, File::open(path)?);
+    let meta = VgkReader::new(&mut f)?.meta().clone();
+    let unit = meta.unit_size as u64;
+    let mut pos = f.stream_position()?;
+    let mut chunks = Vec::new();
+    let mut overview = None;
+    let mut complete = false;
+    let mut samples = 0;
+    while let Some(h) = read_header(&mut f)? {
+        let first = u64::from_le_bytes(h[8..16].try_into().unwrap());
+        let raw_len = u32::from_le_bytes(h[16..20].try_into().unwrap()) as u64;
+        let stored = u32::from_le_bytes(h[20..24].try_into().unwrap()) as u64;
+        let end = pos + CHUNK_HEADER as u64 + stored;
+        match h[4] {
+            kind::SAMPLES => {
+                if f.get_ref().metadata()?.len() < end {
+                    break; // cut short
+                }
+                chunks.push(ChunkRef {
+                    offset: pos,
+                    first,
+                    samples: raw_len / unit,
+                });
+                samples = first + raw_len / unit;
+                f.seek_relative(stored as i64)?;
+            }
+            kind::OVERVIEW => {
+                let mut payload = vec![0u8; stored as usize];
+                f.read_exact(&mut payload)?;
+                let ov = decode_payload(&h, payload)?;
+                if ov.len() >= 16 {
+                    let tile = u64::from_le_bytes(ov[0..8].try_into().unwrap());
+                    let n = u64::from_le_bytes(ov[8..16].try_into().unwrap()) as usize;
+                    let tiles = ov[16..]
+                        .as_chunks::<8>()
+                        .0
+                        .iter()
+                        .take(n)
+                        .map(|c| crate::store::Tile {
+                            first: u32::from_le_bytes(c[0..4].try_into().unwrap()),
+                            changed: u32::from_le_bytes(c[4..8].try_into().unwrap()),
+                        })
+                        .collect();
+                    overview = Some((tile, tiles));
+                }
+            }
+            kind::INDEX => {
+                complete = true;
+                break;
+            }
+            _ => f.seek_relative(stored as i64)?,
+        }
+        pos = end;
+    }
+    Ok(Scan {
+        meta,
+        chunks,
+        overview,
+        samples,
+        complete,
+    })
 }
 
 /// Reads a `.vgk` file sequentially; also a [`Source`] for replaying captures.
@@ -428,9 +610,7 @@ impl<R: Read> VgkReader<R> {
                 return Ok(None);
             }
             let first = u64::from_le_bytes(h[8..16].try_into().unwrap());
-            let raw_len = u32::from_le_bytes(h[16..20].try_into().unwrap()) as usize;
             let stored = u32::from_le_bytes(h[20..24].try_into().unwrap()) as usize;
-            let crc = u32::from_le_bytes(h[24..28].try_into().unwrap());
             let mut payload = vec![0u8; stored];
             if let Err(e) = self.input.read_exact(&mut payload) {
                 if e.kind() == io::ErrorKind::UnexpectedEof {
@@ -450,15 +630,7 @@ impl<R: Read> VgkReader<R> {
                 }
                 _ => continue, // unknown kinds are skippable by design
             }
-            let raw = match h[5] {
-                0 => payload,
-                1 => decompress_to_vec_capped::<Zstd>(&payload, raw_len as u64)
-                    .map_err(|e| invalid(format!("chunk at sample {first}: {e:?}")))?,
-                c => return Err(invalid(format!("unknown codec {c}"))),
-            };
-            if raw.len() != raw_len || crc32(&raw) != crc {
-                return Err(invalid(format!("chunk at sample {first}: checksum mismatch")));
-            }
+            let raw = decode_payload(&h, payload)?;
             if first != self.next_sample {
                 return Err(invalid(format!("chunk starts at sample {first}, expected {}", self.next_sample)));
             }

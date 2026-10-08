@@ -1,0 +1,1009 @@
+//! Web control mode: `visgrok web` serves a single-page UI and a WebSocket.
+//!
+//! The browser controls captures (start/stop, device settings), assigns
+//! channel roles and names, and browses any part of a live or recorded
+//! capture. Every request is answered from a [`SampleStore`]: the capture
+//! threads never wait for the UI, and data streams to disk regardless of
+//! what the page is looking at.
+//!
+//! Everything here is std-only: a minimal HTTP/1.1 server, RFC 6455
+//! WebSocket framing (with the SHA-1 the handshake needs) and a small JSON
+//! reader/writer for the message protocol described in `web/index.html`.
+
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use visgrok::Source;
+use visgrok::analyzer::{Analyzer, DecoderOptions, SpiProtocol, parse_uart_format};
+use visgrok::roles::{Role, Suggestion, fmt_hz};
+use visgrok::slogic::{Config, SLogic};
+use visgrok::store::{SampleStore, StoredEvent};
+use visgrok::synth::Synth;
+use visgrok::vgk::VgkReader;
+
+use crate::pipeline::{Pipeline, Setup, format_event};
+
+const PAGE: &str = include_str!("web/index.html");
+
+/// Web mode settings.
+pub struct WebOptions {
+    /// Address to listen on.
+    pub listen: String,
+    /// Directory for new captures and the "open" list.
+    pub dir: PathBuf,
+    /// Capture to open at start.
+    pub open: Option<PathBuf>,
+}
+
+// ---------------------------------------------------------------- session
+
+enum Mode {
+    Idle,
+    /// Converting a foreign file (.sr, .vcd) into a browsable .vgk.
+    Importing {
+        file: String,
+        progress: Arc<AtomicU64>,
+        cancel: Arc<AtomicBool>,
+    },
+    Live {
+        pipe: Arc<Pipeline>,
+        store: Arc<SampleStore>,
+    },
+    Review {
+        store: Arc<SampleStore>,
+        decode: Option<DecodeJob>,
+    },
+}
+
+struct DecodeJob {
+    cancel: Arc<AtomicBool>,
+    progress: Arc<AtomicU64>,
+}
+
+struct Session {
+    dir: PathBuf,
+    mode: Mutex<Mode>,
+    roles: Mutex<Vec<Option<Role>>>,
+    options: Mutex<DecoderOptions>,
+    names: Mutex<Vec<String>>,
+    error: Mutex<Option<String>>,
+}
+
+fn role_id(r: &Option<Role>) -> String {
+    match r {
+        None | Some(Role::Unknown) => String::new(),
+        Some(Role::Uart { baud: 0 }) => "uart".into(),
+        Some(Role::Uart { baud }) => format!("uart:{baud}"),
+        Some(Role::I2cScl { sda }) => format!("i2c-scl:{sda}"),
+        Some(Role::I2cSda { scl }) => format!("i2c-sda:{scl}"),
+        Some(Role::SpiClk) => "spi-clk".into(),
+        Some(Role::SpiMosi) => "spi-mosi".into(),
+        Some(Role::SpiMiso) => "spi-miso".into(),
+        Some(Role::SpiCs) => "spi-cs".into(),
+        Some(Role::SpiDc) => "spi-dc".into(),
+        Some(Role::SpiData { .. }) => "spi-mosi".into(),
+        Some(Role::SdClk) => "sd-clk".into(),
+        Some(Role::SdCmd) => "sd-cmd".into(),
+        Some(Role::SdDat(n)) => format!("sd-dat{n}"),
+        Some(Role::Idle) => "idle".into(),
+        Some(r) => r.to_string(),
+    }
+}
+
+impl Session {
+    fn store(&self) -> Option<Arc<SampleStore>> {
+        match &*self.mode.lock().unwrap() {
+            Mode::Idle | Mode::Importing { .. } => None,
+            Mode::Live { store, .. } | Mode::Review { store, .. } => Some(store.clone()),
+        }
+    }
+
+    fn set_error(&self, e: impl Into<String>) {
+        *self.error.lock().unwrap() = Some(e.into());
+    }
+
+    fn effective_roles(&self, channels: usize) -> Vec<Role> {
+        let mut r: Vec<Role> = self
+            .roles
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| r.clone().unwrap_or(Role::Unknown))
+            .collect();
+        r.resize(channels, Role::Unknown);
+        r
+    }
+
+    /// Stops whatever is running.
+    fn close(&self) {
+        let old = std::mem::replace(&mut *self.mode.lock().unwrap(), Mode::Idle);
+        match old {
+            Mode::Importing { cancel, .. } => cancel.store(true, Ordering::SeqCst),
+            Mode::Live { pipe, .. } => {
+                pipe.stop();
+                // Let the writer finish the file in the background.
+                std::thread::spawn(move || {
+                    pipe.join();
+                });
+            }
+            Mode::Review { decode: Some(j), .. } => j.cancel.store(true, Ordering::SeqCst),
+            _ => {}
+        }
+    }
+
+    fn start(&self, msg: &Json) -> Result<(), String> {
+        self.close();
+        let channels = msg.get("channels").and_then(Json::num).unwrap_or(16.0) as usize;
+        let device = msg.get("device").and_then(Json::str).unwrap_or("slogic");
+        let rate = msg.get("samplerate").and_then(Json::num).map(|r| r as u64);
+        let source: Box<dyn Source> = match device {
+            "demo" => Box::new(Synth::device(rate.unwrap_or(50_000_000), None)),
+            "demo-bus" => Box::new(Synth::new(rate.unwrap_or(20_000_000), None)),
+            _ => {
+                let dev = SLogic::open(msg.get("serial").and_then(Json::str)).map_err(|e| e.to_string())?;
+                let rate = rate.unwrap_or_else(|| dev.model().max_samplerate(channels));
+                let mut cfg = Config::new(channels, rate);
+                cfg.threshold = msg.get("threshold").and_then(Json::num);
+                dev.validate(&cfg).map_err(|e| e.to_string())?;
+                Box::new(dev.start(cfg).map_err(|e| e.to_string())?)
+            }
+        };
+        let mut info = source.info();
+        let names = self.names.lock().unwrap().clone();
+        info.names = (0..info.channels)
+            .map(|i| names.get(i).filter(|n| !n.is_empty()).cloned().unwrap_or(format!("D{i}")))
+            .collect();
+        std::fs::create_dir_all(&self.dir).map_err(|e| e.to_string())?;
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let path = self.dir.join(format!("capture-{stamp}.vgk"));
+        let (store, writer) = SampleStore::create_live(&path, &info, Vec::new()).map_err(|e| format!("{}: {e}", path.display()))?;
+        let roles = self.roles.lock().unwrap().clone();
+        let setup = Setup {
+            roles,
+            options: self.options.lock().unwrap().clone(),
+            names: info.names.iter().cloned().map(Some).collect(),
+            writer: Some(Box::new(writer)),
+            store: Some(store.clone()),
+            ..Default::default()
+        };
+        let pipe = Pipeline::start(source, Some(path), setup)?;
+        *self.mode.lock().unwrap() = Mode::Live { pipe, store };
+        *self.error.lock().unwrap() = None;
+        Ok(())
+    }
+
+    fn open(self: &Arc<Self>, name: &str) -> Result<(), String> {
+        // Only files in the capture directory (no path traversal).
+        let file = Path::new(name).file_name().ok_or("bad file name")?;
+        let path = self.dir.join(file);
+        self.open_path(&path)
+    }
+
+    fn open_path(self: &Arc<Self>, path: &Path) -> Result<(), String> {
+        self.close();
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+        if ext == "vgk" {
+            return self.review(path);
+        }
+        // Other formats are imported once (in the background) into a .vgk
+        // next to them, with an overview so later opens are instant.
+        let out = path.with_extension(format!("{ext}.vgk"));
+        if out.exists() {
+            return self.review(&out);
+        }
+        let progress = Arc::new(AtomicU64::new(0));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let file = path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+        *self.mode.lock().unwrap() = Mode::Importing {
+            file,
+            progress: progress.clone(),
+            cancel: cancel.clone(),
+        };
+        let (me, src) = (self.clone(), path.to_path_buf());
+        std::thread::spawn(move || {
+            let tmp = out.with_extension("vgk.part");
+            let r = SampleStore::import(&src, &tmp, &progress, &cancel).and_then(|()| std::fs::rename(&tmp, &out));
+            match r {
+                Ok(()) => {
+                    if matches!(&*me.mode.lock().unwrap(), Mode::Importing { .. })
+                        && let Err(e) = me.review(&out)
+                    {
+                        me.set_error(e);
+                    }
+                }
+                Err(e) => {
+                    let _ = std::fs::remove_file(&tmp);
+                    if !cancel.load(Ordering::SeqCst) {
+                        me.set_error(format!("import {}: {e}", src.display()));
+                        *me.mode.lock().unwrap() = Mode::Idle;
+                    }
+                }
+            }
+        });
+        Ok(())
+    }
+
+    fn review(&self, vgk: &Path) -> Result<(), String> {
+        let store = SampleStore::open(vgk).map_err(|e| format!("{}: {e}", vgk.display()))?;
+        *self.names.lock().unwrap() = store.info().all_names();
+        *self.mode.lock().unwrap() = Mode::Review { store, decode: None };
+        *self.error.lock().unwrap() = None;
+        self.redecode();
+        Ok(())
+    }
+
+    /// Applies role/option changes: live decoders are rebuilt in place;
+    /// reviewed files are decoded again in the background.
+    fn apply_roles(&self) {
+        if let Mode::Live { pipe, .. } = &*self.mode.lock().unwrap() {
+            *pipe.roles.lock().unwrap() = self.roles.lock().unwrap().clone();
+            *pipe.options.lock().unwrap() = self.options.lock().unwrap().clone();
+            pipe.rebuild_decoders();
+            return;
+        }
+        self.redecode();
+    }
+
+    fn redecode(&self) {
+        let mut mode = self.mode.lock().unwrap();
+        let Mode::Review { store, decode } = &mut *mode else { return };
+        if let Some(j) = decode.take() {
+            j.cancel.store(true, Ordering::SeqCst);
+        }
+        store.clear_events();
+        let info = store.info();
+        let roles = self.effective_roles(info.channels);
+        if roles.iter().all(|r| matches!(r, Role::Unknown | Role::Idle)) {
+            return;
+        }
+        let opts = self.options.lock().unwrap().clone();
+        let job = DecodeJob {
+            cancel: Arc::new(AtomicBool::new(false)),
+            progress: Arc::new(AtomicU64::new(0)),
+        };
+        let (cancel, progress, store) = (job.cancel.clone(), job.progress.clone(), store.clone());
+        *decode = Some(job);
+        std::thread::spawn(move || {
+            let Ok(mut r) = VgkReader::open(store.path()) else { return };
+            let mut a = Analyzer::new(info.channels, info.samplerate);
+            let d = a.decoders_for_roles(&roles, &opts);
+            a.set_decoders(d);
+            let names: Vec<(Arc<str>, u8)> = a
+                .decoders()
+                .iter()
+                .map(|d| (Arc::from(d.name()), d.channels().trailing_zeros() as u8))
+                .collect();
+            while let Ok(Some(b)) = r.read_block() {
+                if cancel.load(Ordering::SeqCst) {
+                    return;
+                }
+                let before = a.annotation_count;
+                a.process(&b);
+                let new = ((a.annotation_count - before) as usize).min(a.annotations.len());
+                let skip = a.annotations.len() - new;
+                store.add_events(a.annotations.iter().skip(skip).map(|t| {
+                    let (source, channel) = names.get(t.decoder).cloned().unwrap_or((Arc::from("?"), 0));
+                    StoredEvent {
+                        start: t.annotation.start,
+                        end: t.annotation.end,
+                        source,
+                        channel,
+                        text: format_event(&t.annotation.event),
+                    }
+                }));
+                progress.store(b.end(), Ordering::SeqCst);
+            }
+            progress.store(u64::MAX, Ordering::SeqCst);
+        });
+    }
+
+    fn status_json(&self) -> String {
+        let mode = self.mode.lock().unwrap();
+        let mut o = Obj::new();
+        o.str("type", "status");
+        let (store, suggestions, pipe_info): (Option<&Arc<SampleStore>>, Vec<Suggestion>, Option<String>) = match &*mode {
+            Mode::Idle => {
+                o.str("mode", "idle");
+                (None, Vec::new(), None)
+            }
+            Mode::Importing { file, progress, .. } => {
+                o.str("mode", "importing");
+                o.str("file", file);
+                o.num("imported", progress.load(Ordering::SeqCst) as f64);
+                (None, Vec::new(), None)
+            }
+            Mode::Live { pipe, store } => {
+                o.str("mode", "live");
+                o.bool("running", !pipe.finished());
+                o.num("written", pipe.written() as f64);
+                o.num("skipped", pipe.blocks_skipped() as f64);
+                if let Some(e) = pipe.error() {
+                    o.str("captureError", &e);
+                }
+                let sugg = pipe.analyzer.lock().unwrap().suggest();
+                (Some(store), sugg, Some(pipe.info.device.clone()))
+            }
+            Mode::Review { store, decode } => {
+                o.str("mode", "review");
+                if let Some(j) = decode {
+                    let p = j.progress.load(Ordering::SeqCst);
+                    o.num("decoded", if p == u64::MAX { store.total() as f64 } else { p as f64 });
+                }
+                (Some(store), Vec::new(), None)
+            }
+        };
+        if let Some(s) = store {
+            let info = s.info();
+            o.str("device", pipe_info.as_deref().unwrap_or(&info.device));
+            o.str(
+                "file",
+                &s.path().file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default(),
+            );
+            o.num("total", s.total() as f64);
+            o.num("loaded", s.loaded() as f64);
+            o.num("samplerate", info.samplerate as f64);
+            o.str("rate", &fmt_hz(info.samplerate as f64));
+            o.num("channels", info.channels as f64);
+            o.num("events", s.event_count() as f64);
+            let names = self.names.lock().unwrap();
+            let roles = self.roles.lock().unwrap();
+            let chans: Vec<String> = (0..info.channels)
+                .map(|i| {
+                    let mut c = Obj::new();
+                    c.str("name", names.get(i).filter(|n| !n.is_empty()).map_or(&info.name(i), |n| n));
+                    c.str("role", &role_id(&roles.get(i).cloned().flatten()));
+                    if let Some(sg) = suggestions.get(i).filter(|s| !matches!(s.role, Role::Unknown)) {
+                        c.str("suggest", &sg.role.to_string());
+                    }
+                    c.finish()
+                })
+                .collect();
+            o.raw("chans", &format!("[{}]", chans.join(",")));
+        }
+        let opts = self.options.lock().unwrap();
+        o.str(
+            "spiProto",
+            match opts.spi_protocol {
+                SpiProtocol::Raw => "raw",
+                SpiProtocol::Ssd1306 { height: 32, .. } => "ssd1306:128x32",
+                SpiProtocol::Ssd1306 { .. } => "ssd1306",
+            },
+        );
+        if let Some(e) = &*self.error.lock().unwrap() {
+            o.str("error", e);
+        }
+        o.finish()
+    }
+
+    fn files_json(&self) -> String {
+        let mut files: Vec<(String, u64, u64)> = std::fs::read_dir(&self.dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                let ext = name.rsplit('.').next()?.to_ascii_lowercase();
+                // Imported copies are opened through their source file.
+                if name.ends_with(".sr.vgk") || name.ends_with(".vcd.vgk") {
+                    return None;
+                }
+                if !matches!(ext.as_str(), "vgk" | "sr" | "vcd") {
+                    return None;
+                }
+                let m = e.metadata().ok()?;
+                let t = m.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+                Some((name, m.len(), t))
+            })
+            .collect();
+        files.sort_by_key(|f| std::cmp::Reverse(f.2));
+        let items: Vec<String> = files
+            .iter()
+            .map(|(n, size, t)| {
+                let mut o = Obj::new();
+                o.str("name", n);
+                o.num("size", *size as f64);
+                o.num("mtime", *t as f64);
+                o.finish()
+            })
+            .collect();
+        format!(
+            r#"{{"type":"files","dir":{},"files":[{}]}}"#,
+            jstr(&self.dir.display().to_string()),
+            items.join(",")
+        )
+    }
+
+    /// Handles one client message; returns the reply, if any.
+    fn handle(self: &Arc<Self>, msg: &Json) -> Option<String> {
+        let id = msg.get("id").and_then(Json::num).unwrap_or(0.0);
+        let cmd = msg.get("cmd").and_then(Json::str).unwrap_or("");
+        let result = |r: Result<(), String>| -> Option<String> {
+            match r {
+                Ok(()) => Some(self.status_json()),
+                Err(e) => {
+                    self.set_error(e.clone());
+                    Some(format!(r#"{{"type":"error","message":{}}}"#, jstr(&e)))
+                }
+            }
+        };
+        match cmd {
+            "status" => Some(self.status_json()),
+            "files" => Some(self.files_json()),
+            "start" => result(self.start(msg)),
+            "stop" => {
+                if let Mode::Live { pipe, .. } = &*self.mode.lock().unwrap() {
+                    pipe.stop();
+                }
+                Some(self.status_json())
+            }
+            "close" => {
+                self.close();
+                Some(self.status_json())
+            }
+            "open" => result(
+                msg.get("file")
+                    .and_then(Json::str)
+                    .ok_or_else(|| "no file".to_string())
+                    .and_then(|f| self.open(f)),
+            ),
+            "roles" => {
+                if let Some(Json::Arr(a)) = msg.get("roles") {
+                    let mut roles = Vec::with_capacity(a.len());
+                    for r in a {
+                        let r = r.str().unwrap_or("");
+                        roles.push(if r.is_empty() { None } else { Role::parse(r).ok() });
+                    }
+                    *self.roles.lock().unwrap() = roles;
+                }
+                {
+                    let mut o = self.options.lock().unwrap();
+                    if let Some(p) = msg.get("spiProto").and_then(Json::str).and_then(|p| SpiProtocol::parse(p).ok()) {
+                        o.spi_protocol = p;
+                    }
+                    if let Some(f) = msg.get("uartFormat").and_then(Json::str).and_then(|f| parse_uart_format(f).ok()) {
+                        o.uart_format = f;
+                    }
+                }
+                self.apply_roles();
+                Some(self.status_json())
+            }
+            "names" => {
+                if let Some(Json::Arr(a)) = msg.get("names") {
+                    let names: Vec<String> = a.iter().map(|n| n.str().unwrap_or("").to_string()).collect();
+                    if let Some(s) = self.store() {
+                        let info = s.info();
+                        s.set_names(
+                            (0..info.channels)
+                                .map(|i| names.get(i).filter(|n| !n.is_empty()).cloned().unwrap_or(format!("D{i}")))
+                                .collect(),
+                        );
+                    }
+                    *self.names.lock().unwrap() = names;
+                }
+                Some(self.status_json())
+            }
+            "view" => {
+                let store = self.store()?;
+                let start = msg.get("start").and_then(Json::num).unwrap_or(0.0).max(0.0) as u64;
+                let end = msg.get("end").and_then(Json::num).unwrap_or(0.0).max(0.0) as u64;
+                let cols = msg.get("columns").and_then(Json::num).unwrap_or(800.0) as usize;
+                let rows = match store.view(start, end, cols) {
+                    Ok(r) => r,
+                    Err(e) => return Some(format!(r#"{{"type":"error","message":{}}}"#, jstr(&e.to_string()))),
+                };
+                let rows: Vec<String> = rows.iter().map(|r| jstr(&r.iter().map(|l| l.char()).collect::<String>())).collect();
+                let tag = msg.get("tag").and_then(Json::str).unwrap_or("main");
+                Some(format!(
+                    r#"{{"type":"view","id":{id},"tag":{},"start":{start},"end":{end},"columns":{cols},"rows":[{}]}}"#,
+                    jstr(tag),
+                    rows.join(",")
+                ))
+            }
+            "events" => {
+                let store = self.store()?;
+                let start = msg.get("start").and_then(Json::num).unwrap_or(0.0).max(0.0) as u64;
+                let end = msg.get("end").and_then(Json::num).unwrap_or(0.0).max(0.0) as u64;
+                let limit = msg.get("limit").and_then(Json::num).unwrap_or(2000.0) as usize;
+                let items: Vec<String> = store
+                    .events(start, end, limit)
+                    .iter()
+                    .map(|e| format!(r#"[{},{},{},{},{}]"#, e.start, e.end, e.channel, jstr(&e.source), jstr(&e.text)))
+                    .collect();
+                Some(format!(
+                    r#"{{"type":"events","id":{id},"start":{start},"end":{end},"items":[{}]}}"#,
+                    items.join(",")
+                ))
+            }
+            "seek" => {
+                let store = self.store()?;
+                let at = msg.get("at").and_then(Json::num).unwrap_or(0.0).max(0.0) as u64;
+                let fwd = msg.get("forward").and_then(Json::bool).unwrap_or(true);
+                let e = store.event_near(at, fwd)?;
+                Some(format!(
+                    r#"{{"type":"seek","start":{},"end":{},"text":{}}}"#,
+                    e.start,
+                    e.end,
+                    jstr(&e.text)
+                ))
+            }
+            _ => Some(format!(
+                r#"{{"type":"error","message":{}}}"#,
+                jstr(&format!("unknown command {cmd:?}"))
+            )),
+        }
+    }
+}
+
+// ---------------------------------------------------------------- server
+
+/// Runs the web server until the process is interrupted.
+pub fn run(opts: WebOptions) -> io::Result<()> {
+    let session = Arc::new(Session {
+        dir: opts.dir,
+        mode: Mutex::new(Mode::Idle),
+        roles: Mutex::new(Vec::new()),
+        options: Mutex::new(DecoderOptions::default()),
+        names: Mutex::new(Vec::new()),
+        error: Mutex::new(None),
+    });
+    if let Some(p) = &opts.open
+        && let Err(e) = session.open_path(p)
+    {
+        eprintln!("visgrok: {e}");
+    }
+    let listener = TcpListener::bind(&opts.listen)?;
+    eprintln!(
+        "visgrok web UI: http://{}/  (captures in {})",
+        listener.local_addr()?,
+        session.dir.display()
+    );
+    for conn in listener.incoming() {
+        let Ok(stream) = conn else { continue };
+        let s = session.clone();
+        std::thread::spawn(move || {
+            let _ = serve(stream, s);
+        });
+    }
+    Ok(())
+}
+
+fn serve(stream: TcpStream, session: Arc<Session>) -> io::Result<()> {
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut line = String::new();
+    reader.read_line(&mut line)?;
+    let path = line.split_whitespace().nth(1).unwrap_or("/").to_string();
+    let mut key = None;
+    loop {
+        let mut h = String::new();
+        if reader.read_line(&mut h)? == 0 || h.trim().is_empty() {
+            break;
+        }
+        if let Some((k, v)) = h.split_once(':')
+            && k.trim().eq_ignore_ascii_case("sec-websocket-key")
+        {
+            key = Some(v.trim().to_string());
+        }
+    }
+    let mut out = stream;
+    match (path.as_str(), key) {
+        ("/ws", Some(key)) => {
+            let accept = base64(&sha1(format!("{key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11").as_bytes()));
+            write!(
+                out,
+                "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
+            )?;
+            websocket(reader, out, session)
+        }
+        ("/" | "/index.html", _) => {
+            write!(
+                out,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+                PAGE.len()
+            )?;
+            out.write_all(PAGE.as_bytes())
+        }
+        _ => write!(out, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
+    }
+}
+
+fn send_text(out: &Mutex<TcpStream>, text: &str) -> io::Result<()> {
+    let b = text.as_bytes();
+    let mut h = vec![0x81u8];
+    match b.len() {
+        n if n < 126 => h.push(n as u8),
+        n if n < 65536 => {
+            h.push(126);
+            h.extend_from_slice(&(n as u16).to_be_bytes());
+        }
+        n => {
+            h.push(127);
+            h.extend_from_slice(&(n as u64).to_be_bytes());
+        }
+    }
+    let mut o = out.lock().unwrap();
+    o.write_all(&h)?;
+    o.write_all(b)?;
+    o.flush()
+}
+
+/// Reads one complete message (handling fragmentation, ping and close).
+fn read_message(r: &mut impl Read, out: &Mutex<TcpStream>) -> io::Result<Option<Vec<u8>>> {
+    let mut msg = Vec::new();
+    loop {
+        let mut h = [0u8; 2];
+        r.read_exact(&mut h)?;
+        let fin = h[0] & 0x80 != 0;
+        let op = h[0] & 0x0f;
+        let masked = h[1] & 0x80 != 0;
+        let mut len = (h[1] & 0x7f) as u64;
+        if len == 126 {
+            let mut b = [0u8; 2];
+            r.read_exact(&mut b)?;
+            len = u16::from_be_bytes(b) as u64;
+        } else if len == 127 {
+            let mut b = [0u8; 8];
+            r.read_exact(&mut b)?;
+            len = u64::from_be_bytes(b);
+        }
+        if len > 16 << 20 {
+            return Err(io::Error::other("message too large"));
+        }
+        let mut mask = [0u8; 4];
+        if masked {
+            r.read_exact(&mut mask)?;
+        }
+        let mut payload = vec![0u8; len as usize];
+        r.read_exact(&mut payload)?;
+        if masked {
+            for (i, b) in payload.iter_mut().enumerate() {
+                *b ^= mask[i % 4];
+            }
+        }
+        match op {
+            0x8 => return Ok(None),
+            0x9 => {
+                let mut o = out.lock().unwrap();
+                o.write_all(&[0x8a, payload.len().min(125) as u8])?;
+                o.write_all(&payload[..payload.len().min(125)])?;
+                continue;
+            }
+            0xa => continue,
+            _ => msg.extend_from_slice(&payload),
+        }
+        if fin {
+            return Ok(Some(msg));
+        }
+    }
+}
+
+fn websocket(mut reader: BufReader<TcpStream>, out: TcpStream, session: Arc<Session>) -> io::Result<()> {
+    let out = Arc::new(Mutex::new(out));
+    let alive = Arc::new(AtomicBool::new(true));
+    // Status pushes, so the page follows live captures without polling.
+    {
+        let (out, alive, session) = (out.clone(), alive.clone(), session.clone());
+        std::thread::spawn(move || {
+            while alive.load(Ordering::SeqCst) {
+                if send_text(&out, &session.status_json()).is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(250));
+            }
+        });
+    }
+    send_text(&out, &session.files_json())?;
+    let r = loop {
+        let msg = match read_message(&mut reader, &out) {
+            Ok(Some(m)) => m,
+            Ok(None) => break Ok(()),
+            Err(e) => break Err(e),
+        };
+        let Ok(text) = String::from_utf8(msg) else { continue };
+        let Some(json) = Json::parse(&text) else { continue };
+        if let Some(reply) = session.handle(&json)
+            && let Err(e) = send_text(&out, &reply)
+        {
+            break Err(e);
+        }
+    };
+    alive.store(false, Ordering::SeqCst);
+    r
+}
+
+// ---------------------------------------------------------------- JSON
+
+/// A parsed JSON value.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Json {
+    Null,
+    Bool(bool),
+    Num(f64),
+    Str(String),
+    Arr(Vec<Json>),
+    Obj(Vec<(String, Json)>),
+}
+
+impl Json {
+    pub fn parse(s: &str) -> Option<Json> {
+        let mut p = Parser { b: s.as_bytes(), i: 0 };
+        let v = p.value()?;
+        p.ws();
+        (p.i == p.b.len()).then_some(v)
+    }
+
+    pub fn get(&self, k: &str) -> Option<&Json> {
+        match self {
+            Json::Obj(o) => o.iter().find(|(n, _)| n == k).map(|(_, v)| v),
+            _ => None,
+        }
+    }
+
+    pub fn str(&self) -> Option<&str> {
+        match self {
+            Json::Str(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    pub fn num(&self) -> Option<f64> {
+        match self {
+            Json::Num(n) => Some(*n),
+            _ => None,
+        }
+    }
+
+    pub fn bool(&self) -> Option<bool> {
+        match self {
+            Json::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
+}
+
+struct Parser<'a> {
+    b: &'a [u8],
+    i: usize,
+}
+
+impl Parser<'_> {
+    fn ws(&mut self) {
+        while self.i < self.b.len() && self.b[self.i].is_ascii_whitespace() {
+            self.i += 1;
+        }
+    }
+
+    fn eat(&mut self, c: u8) -> Option<()> {
+        self.ws();
+        (self.b.get(self.i) == Some(&c)).then(|| self.i += 1)
+    }
+
+    fn value(&mut self) -> Option<Json> {
+        self.ws();
+        match *self.b.get(self.i)? {
+            b'{' => {
+                self.i += 1;
+                let mut o = Vec::new();
+                if self.eat(b'}').is_some() {
+                    return Some(Json::Obj(o));
+                }
+                loop {
+                    self.ws();
+                    let Json::Str(k) = self.string()? else { return None };
+                    self.eat(b':')?;
+                    o.push((k, self.value()?));
+                    if self.eat(b',').is_none() {
+                        self.eat(b'}')?;
+                        return Some(Json::Obj(o));
+                    }
+                }
+            }
+            b'[' => {
+                self.i += 1;
+                let mut a = Vec::new();
+                if self.eat(b']').is_some() {
+                    return Some(Json::Arr(a));
+                }
+                loop {
+                    a.push(self.value()?);
+                    if self.eat(b',').is_none() {
+                        self.eat(b']')?;
+                        return Some(Json::Arr(a));
+                    }
+                }
+            }
+            b'"' => self.string(),
+            b't' if self.b[self.i..].starts_with(b"true") => {
+                self.i += 4;
+                Some(Json::Bool(true))
+            }
+            b'f' if self.b[self.i..].starts_with(b"false") => {
+                self.i += 5;
+                Some(Json::Bool(false))
+            }
+            b'n' if self.b[self.i..].starts_with(b"null") => {
+                self.i += 4;
+                Some(Json::Null)
+            }
+            _ => {
+                let s = self.i;
+                while self.i < self.b.len() && matches!(self.b[self.i], b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E') {
+                    self.i += 1;
+                }
+                std::str::from_utf8(&self.b[s..self.i]).ok()?.parse().ok().map(Json::Num)
+            }
+        }
+    }
+
+    fn string(&mut self) -> Option<Json> {
+        if self.b.get(self.i) != Some(&b'"') {
+            return None;
+        }
+        self.i += 1;
+        let mut out = String::new();
+        loop {
+            let c = *self.b.get(self.i)?;
+            self.i += 1;
+            match c {
+                b'"' => return Some(Json::Str(out)),
+                b'\\' => {
+                    let e = *self.b.get(self.i)?;
+                    self.i += 1;
+                    match e {
+                        b'n' => out.push('\n'),
+                        b't' => out.push('\t'),
+                        b'r' => out.push('\r'),
+                        b'b' => out.push('\u{8}'),
+                        b'f' => out.push('\u{c}'),
+                        b'u' => {
+                            let h = std::str::from_utf8(self.b.get(self.i..self.i + 4)?).ok()?;
+                            self.i += 4;
+                            out.push(char::from_u32(u32::from_str_radix(h, 16).ok()?).unwrap_or('\u{fffd}'));
+                        }
+                        c => out.push(c as char),
+                    }
+                }
+                _ => {
+                    // Copy a run of plain UTF-8 bytes.
+                    let s = self.i - 1;
+                    while self.i < self.b.len() && self.b[self.i] != b'"' && self.b[self.i] != b'\\' {
+                        self.i += 1;
+                    }
+                    out.push_str(std::str::from_utf8(&self.b[s..self.i]).ok()?);
+                }
+            }
+        }
+    }
+}
+
+/// JSON string literal.
+fn jstr(s: &str) -> String {
+    let mut o = String::with_capacity(s.len() + 2);
+    o.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => o.push_str("\\\""),
+            '\\' => o.push_str("\\\\"),
+            '\n' => o.push_str("\\n"),
+            '\r' => o.push_str("\\r"),
+            '\t' => o.push_str("\\t"),
+            c if (c as u32) < 0x20 => o.push_str(&format!("\\u{:04x}", c as u32)),
+            c => o.push(c),
+        }
+    }
+    o.push('"');
+    o
+}
+
+/// Builds a JSON object.
+struct Obj(Vec<String>);
+
+impl Obj {
+    fn new() -> Obj {
+        Obj(Vec::new())
+    }
+    fn str(&mut self, k: &str, v: &str) {
+        self.0.push(format!("{}:{}", jstr(k), jstr(v)));
+    }
+    fn num(&mut self, k: &str, v: f64) {
+        self.0
+            .push(format!("{}:{}", jstr(k), if v.is_finite() { v.to_string() } else { "null".into() }));
+    }
+    fn bool(&mut self, k: &str, v: bool) {
+        self.0.push(format!("{}:{v}", jstr(k)));
+    }
+    fn raw(&mut self, k: &str, v: &str) {
+        self.0.push(format!("{}:{v}", jstr(k)));
+    }
+    fn finish(self) -> String {
+        format!("{{{}}}", self.0.join(","))
+    }
+}
+
+// ---------------------------------------------------------------- SHA-1, base64
+
+fn sha1(data: &[u8]) -> [u8; 20] {
+    let mut h: [u32; 5] = [0x6745_2301, 0xefcd_ab89, 0x98ba_dcfe, 0x1032_5476, 0xc3d2_e1f0];
+    let mut msg = data.to_vec();
+    let bits = (data.len() as u64) * 8;
+    msg.push(0x80);
+    while msg.len() % 64 != 56 {
+        msg.push(0);
+    }
+    msg.extend_from_slice(&bits.to_be_bytes());
+    for block in msg.as_chunks::<64>().0 {
+        let mut w = [0u32; 80];
+        for i in 0..16 {
+            w[i] = u32::from_be_bytes(block[4 * i..4 * i + 4].try_into().unwrap());
+        }
+        for i in 16..80 {
+            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
+        }
+        let [mut a, mut b, mut c, mut d, mut e] = h;
+        for (i, wi) in w.iter().enumerate() {
+            let (f, k) = match i {
+                0..=19 => ((b & c) | (!b & d), 0x5a82_7999),
+                20..=39 => (b ^ c ^ d, 0x6ed9_eba1),
+                40..=59 => ((b & c) | (b & d) | (c & d), 0x8f1b_bcdc),
+                _ => (b ^ c ^ d, 0xca62_c1d6),
+            };
+            let t = a.rotate_left(5).wrapping_add(f).wrapping_add(e).wrapping_add(k).wrapping_add(*wi);
+            e = d;
+            d = c;
+            c = b.rotate_left(30);
+            b = a;
+            a = t;
+        }
+        for (x, v) in h.iter_mut().zip([a, b, c, d, e]) {
+            *x = x.wrapping_add(v);
+        }
+    }
+    let mut out = [0u8; 20];
+    for (i, x) in h.iter().enumerate() {
+        out[4 * i..4 * i + 4].copy_from_slice(&x.to_be_bytes());
+    }
+    out
+}
+
+fn base64(data: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut o = String::new();
+    for c in data.chunks(3) {
+        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        for k in 0..4 {
+            if k <= c.len() {
+                o.push(T[(n >> (18 - 6 * k) & 63) as usize] as char);
+            } else {
+                o.push('=');
+            }
+        }
+    }
+    o
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn handshake_vectors() {
+        // RFC 6455 section 1.3 example.
+        let k = "dGhlIHNhbXBsZSBub25jZQ==258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+        assert_eq!(base64(&sha1(k.as_bytes())), "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+        assert_eq!(base64(b"ab"), "YWI=");
+    }
+
+    #[test]
+    fn json_roundtrip() {
+        let j = Json::parse(r#"{"cmd":"view","start":12,"x":[1,"a\"b",true,null],"u":"été ok"}"#).unwrap();
+        assert_eq!(j.get("cmd").and_then(Json::str), Some("view"));
+        assert_eq!(j.get("start").and_then(Json::num), Some(12.0));
+        assert_eq!(j.get("u").and_then(Json::str), Some("été ok"));
+        assert_eq!(jstr("a\"b\n"), r#""a\"b\n""#);
+    }
+}

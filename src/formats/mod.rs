@@ -121,6 +121,10 @@ impl Default for WriteOptions {
 pub trait SampleWriter: Send {
     /// Appends packed samples.
     fn write(&mut self, data: &[u8]) -> io::Result<()>;
+    /// Appends a shared block (writers that keep blocks avoid a copy).
+    fn write_block(&mut self, b: &std::sync::Arc<Block>) -> io::Result<()> {
+        self.write(&b.data)
+    }
     /// Bytes written to the file so far.
     fn bytes_written(&self) -> u64;
     /// Raw sample bytes committed so far.

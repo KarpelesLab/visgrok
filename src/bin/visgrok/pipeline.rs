@@ -18,6 +18,7 @@ use visgrok::analyzer::{Analyzer, DecoderOptions, Tagged};
 use visgrok::decode::Event;
 use visgrok::formats::{SampleWriter, WriteOptions};
 use visgrok::roles::Role;
+use visgrok::store::{SampleStore, StoredEvent};
 use visgrok::{Block, CaptureInfo, Source};
 
 /// What to start a pipeline with besides the source and output.
@@ -33,6 +34,10 @@ pub struct Setup {
     pub names: Vec<Option<String>>,
     /// Never skip blocks in analysis (replaying a file: the source can wait).
     pub lossless_analysis: bool,
+    /// Use this writer instead of creating one from the output path.
+    pub writer: Option<Box<dyn SampleWriter>>,
+    /// Store that receives decoded events (web UI).
+    pub store: Option<Arc<SampleStore>>,
 }
 
 /// Shared state between the pipeline threads and the UI.
@@ -56,6 +61,7 @@ pub struct Pipeline {
     started: Instant,
     log_seen: AtomicU64,
     threads: Mutex<Vec<JoinHandle<()>>>,
+    store: Option<Arc<SampleStore>>,
 }
 
 impl Pipeline {
@@ -72,14 +78,17 @@ impl Pipeline {
             options,
             names,
             lossless_analysis,
+            writer,
+            store,
         } = setup;
         roles.resize(info.channels, None);
         let names: Vec<String> = (0..info.channels)
             .map(|i| names.get(i).cloned().flatten().unwrap_or_else(|| format!("D{i}")))
             .collect();
-        let writer = match &output {
-            Some(p) => Some(Recorder::create(p, &info, &names, extra).map_err(|e| format!("{}: {e}", p.display()))?),
-            None => None,
+        let writer = match (writer, &output) {
+            (Some(w), _) => Some(Recorder(w)),
+            (None, Some(p)) => Some(Recorder::create(p, &info, &names, extra).map_err(|e| format!("{}: {e}", p.display()))?),
+            (None, None) => None,
         };
         let pipe = Pipeline {
             analyzer: Mutex::new(Analyzer::new(info.channels, info.samplerate)),
@@ -98,6 +107,7 @@ impl Pipeline {
             started: Instant::now(),
             log_seen: AtomicU64::new(0),
             threads: Mutex::new(Vec::new()),
+            store,
         };
         pipe.rebuild_decoders();
         let shared = Arc::new(pipe);
@@ -165,7 +175,7 @@ impl Pipeline {
 
     fn write(&self, mut w: Recorder, rx: Receiver<Arc<Block>>) {
         for b in rx {
-            if let Err(e) = w.write(&b.data) {
+            if let Err(e) = w.0.write_block(&b) {
                 self.fail(format!("write: {e}"));
                 return;
             }
@@ -189,7 +199,31 @@ impl Pipeline {
                     return;
                 }
                 let part = b.slice(i, i + SLICE);
-                self.analyzer.lock().unwrap().process(&part);
+                let mut a = self.analyzer.lock().unwrap();
+                let before = a.annotation_count;
+                a.process(&part);
+                if let Some(store) = &self.store {
+                    let new = ((a.annotation_count - before) as usize).min(a.annotations.len());
+                    if new > 0 {
+                        let names: Vec<(Arc<str>, u8)> = a
+                            .decoders()
+                            .iter()
+                            .map(|d| (Arc::from(d.name()), d.channels().trailing_zeros() as u8))
+                            .collect();
+                        let skip = a.annotations.len() - new;
+                        store.add_events(a.annotations.iter().skip(skip).map(|t| {
+                            let (source, channel) = names.get(t.decoder).cloned().unwrap_or((Arc::from("?"), 0));
+                            StoredEvent {
+                                start: t.annotation.start,
+                                end: t.annotation.end,
+                                source,
+                                channel,
+                                text: format_event(&t.annotation.event),
+                            }
+                        }));
+                    }
+                }
+                drop(a);
                 i += SLICE;
                 std::thread::yield_now();
             }
@@ -417,10 +451,6 @@ impl Recorder {
             ..Default::default()
         };
         Ok(Recorder(visgrok::formats::create(path, &info, &opts)?))
-    }
-
-    fn write(&mut self, data: &[u8]) -> std::io::Result<()> {
-        self.0.write(data)
     }
 
     fn bytes_written(&self) -> u64 {

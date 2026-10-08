@@ -9,6 +9,7 @@
 //! - [`source`]: the [`Source`] trait for block streams; [`synth`]: a synthetic source.
 //! - [`slogic`]: the SLogic USB driver.
 //! - [`formats`]: reading, writing and converting `.vgk`, `.sr`, `.vcd`, `.bin`.
+//! - [`store`]: random-access view of live or recorded captures, for UIs.
 //! - [`vgk`]: the compressed visgrok capture format.
 //! - [`srzip`]: streaming sigrok `.sr` session writer.
 
@@ -23,6 +24,7 @@ pub mod slogic;
 pub mod source;
 pub mod srzip;
 pub mod stats;
+pub mod store;
 pub mod synth;
 pub mod vgk;
 

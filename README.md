@@ -48,6 +48,25 @@ Recordings use visgrok's compressed `.vgk` format by default (typically 30× to
 25 000× smaller than raw; see [docs/FORMAT.md](docs/FORMAT.md)). Name the
 output `*.sr` to write a sigrok session for PulseView / `sigrok-cli` directly.
 
+### Web UI
+
+```sh
+visgrok web                        # http://127.0.0.1:8090/, captures in ./captures
+visgrok web --dir ~/captures navi.sr   # open a capture right away
+```
+
+From the browser: record (SLogic or demo source; channels, rate, threshold),
+assign channel names and roles (UART, SPI/SSD1306, I2C, SD card), browse any
+part of a live or recorded capture (wheel to zoom, drag to pan, minimap,
+`End` to follow live, `[` `]` to jump between decoded events) and click
+decoded events to jump to them. The view position is kept in the URL, so
+links point at a moment in a capture.
+
+The capture never waits for the page: data streams to disk and the browser
+reads it through a sample store (a 0.2% overview for zoomed-out views, raw
+chunks for zoomed-in ones). `.sr`/`.vcd` files are imported once into a
+`.vgk` next to them. It binds to localhost by default (`--listen` to change).
+
 ### Decoding your buses
 
 Assign pins with `-r CH=ROLE` (or interactively: select a channel, press Enter):

@@ -1,0 +1,504 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>visgrok</title>
+<style>
+:root {
+  --bg: #0f1115; --panel: #171a21; --line: #262b36; --text: #d7dbe3; --dim: #8a93a5;
+  --hi: #7ee3a3; --lo: #3f8f63; --busy: #5fb88a; --unk: #3a404d; --accent: #6aa8ff; --warn: #f0b45a; --err: #ff6b6b;
+  --ev: #6aa8ff; --evbg: rgba(106,168,255,.18); --cursor: #f0b45a;
+  font: 13px/1.35 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); }
+body { display: grid; grid-template-rows: auto auto 1fr auto; height: 100vh; }
+header { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; padding: 8px 12px; background: var(--panel); border-bottom: 1px solid var(--line); }
+header h1 { font-size: 15px; margin: 0 6px 0 0; letter-spacing: .5px; }
+.group { display: flex; gap: 6px; align-items: center; }
+.group + .group { padding-left: 12px; border-left: 1px solid var(--line); }
+label { color: var(--dim); }
+select, input, button { font: inherit; color: var(--text); background: #0d0f13; border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; }
+input[type=number] { width: 90px; }
+button { cursor: pointer; background: #1d2230; }
+button:hover { border-color: var(--accent); }
+button.primary { background: #1f4f33; border-color: #2c7a4e; }
+button.danger { background: #4a1f24; border-color: #7a2c35; }
+button.on { background: #1d3557; border-color: var(--accent); }
+#status { color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#status b { color: var(--text); font-weight: 600; }
+#status .rec { color: var(--err); }
+#status .err { color: var(--err); }
+#minimap { height: 34px; border-bottom: 1px solid var(--line); background: #12151b; cursor: pointer; position: relative; }
+#main { display: grid; grid-template-columns: 250px 1fr; min-height: 0; }
+#chans { overflow: hidden; border-right: 1px solid var(--line); background: var(--panel); }
+.chan { display: grid; grid-template-columns: 1fr 112px; gap: 4px; align-items: center; padding: 0 6px; border-bottom: 1px solid var(--line); }
+.chan input { width: 100%; padding: 2px 6px; }
+.chan select { width: 100%; padding: 2px 4px; }
+.chan .sugg { grid-column: 1 / 3; color: var(--dim); font-size: 11px; margin-top: -2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#wavewrap { position: relative; min-width: 0; min-height: 0; }
+#wave { display: block; width: 100%; height: 100%; cursor: grab; }
+#wave.drag { cursor: grabbing; }
+footer { display: grid; grid-template-columns: 1fr; border-top: 1px solid var(--line); background: var(--panel); height: 30vh; min-height: 120px; }
+#evhead { display: flex; gap: 10px; align-items: center; padding: 4px 10px; border-bottom: 1px solid var(--line); color: var(--dim); }
+#events { overflow: auto; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+#events div { display: grid; grid-template-columns: 120px 90px 1fr; gap: 10px; padding: 0 10px; cursor: pointer; white-space: nowrap; }
+#events div:hover { background: #1d2230; }
+#events .t { color: var(--dim); text-align: right; }
+#events .s { color: var(--accent); overflow: hidden; text-overflow: ellipsis; }
+#events .x { overflow: hidden; text-overflow: ellipsis; }
+.hint { color: var(--dim); font-size: 11px; }
+@media (max-width: 760px) { #main { grid-template-columns: 1fr; } #chans { display: none; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>visgrok</h1>
+  <div class="group">
+    <select id="device" title="Capture source">
+      <option value="slogic">SLogic</option>
+      <option value="demo">Demo: UART + OLED</option>
+      <option value="demo-bus">Demo: bus mix</option>
+    </select>
+    <label>ch</label><select id="nch"><option>4</option><option>8</option><option selected>16</option><option>32</option></select>
+    <label>rate</label><input id="rate" placeholder="max" title="Sample rate, e.g. 50M (empty: device maximum)" style="width:80px">
+    <label>V<sub>th</sub></label><input id="vth" type="number" step="0.05" placeholder="2.0" style="width:70px">
+    <button id="start" class="primary">● Record</button>
+    <button id="stop" class="danger">■ Stop</button>
+  </div>
+  <div class="group">
+    <select id="files" title="Captures in the capture directory"><option value="">Open capture…</option></select>
+  </div>
+  <div class="group">
+    <label>SPI</label><select id="spiproto"><option value="raw">raw</option><option value="ssd1306">SSD1306 128×64</option><option value="ssd1306:128x32">SSD1306 128×32</option></select>
+    <label>UART</label><select id="uartfmt"><option value="auto">auto</option><option>8N1</option><option>8E1</option><option>8E2</option><option>8O1</option><option>7E1</option></select>
+  </div>
+  <div class="group">
+    <button id="follow" title="Keep the newest samples in view (End)">⏵ Live</button>
+    <button id="fit" title="Show the whole capture (0)">Fit</button>
+  </div>
+  <div id="status">connecting…</div>
+</header>
+<div id="minimap"><canvas id="mini" style="width:100%;height:100%;display:block"></canvas></div>
+<div id="main">
+  <div id="chans"></div>
+  <div id="wavewrap"><canvas id="wave"></canvas></div>
+</div>
+<footer>
+  <div id="evhead"><b style="color:var(--text)">Decoded</b><span id="evcount"></span>
+    <span class="hint">wheel: zoom · drag / shift+wheel: pan · ←/→ pan · +/- zoom · [ ] previous/next event · End: live</span></div>
+  <div id="events"></div>
+</footer>
+<script>
+"use strict";
+// ------------------------------------------------------------ state
+const ROLES = [
+  ["", "—"], ["uart", "UART (auto)"], ["spi-clk", "SPI SCLK"], ["spi-mosi", "SPI MOSI/DI"], ["spi-miso", "SPI MISO/DO"],
+  ["spi-cs", "SPI CS"], ["spi-dc", "SPI D/C"], ["i2c-scl", "I2C SCL"], ["i2c-sda", "I2C SDA"],
+  ["sd-clk", "SD CLK"], ["sd-cmd", "SD CMD"], ["sd-dat0", "SD DAT0"], ["sd-dat1", "SD DAT1"], ["sd-dat2", "SD DAT2"], ["sd-dat3", "SD DAT3"],
+  ["idle", "ignore"],
+];
+const ROW = 30, RULER = 24;
+let st = { mode: "idle", total: 0, samplerate: 1, channels: 0, chans: [] };
+let view = { start: 0, end: 1 };       // visible samples [start, end)
+let follow = true;
+let rows = null, rowsFor = null;       // last waveform data and the view it was for
+let mini = null;
+let events = [], evFor = null;
+let cursor = null;                     // sample under the mouse
+let reqId = 0, pending = { main: false, events: false, mini: false }, dirty = { main: true, events: true, mini: true };
+let rolesSent = "";
+
+const $ = (id) => document.getElementById(id);
+const wave = $("wave"), wctx = wave.getContext("2d");
+const miniC = $("mini"), mctx = miniC.getContext("2d");
+
+// ------------------------------------------------------------ socket
+let ws;
+function connect() {
+  ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
+  ws.onopen = () => { send({ cmd: "status" }); };
+  ws.onclose = () => { $("status").textContent = "disconnected — retrying…"; setTimeout(connect, 1000); };
+  ws.onmessage = (m) => onMessage(JSON.parse(m.data));
+}
+function send(o) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
+
+function onMessage(m) {
+  if (m.type === "status") onStatus(m);
+  else if (m.type === "files") onFiles(m);
+  else if (m.type === "view") {
+    pending[m.tag] = false;
+    if (m.tag === "mini") { mini = m; drawMini(); } else { rows = m.rows; rowsFor = m; draw(); }
+    pump();
+  } else if (m.type === "events") { pending.events = false; events = m.items; evFor = m; renderEvents(); draw(); pump(); }
+  else if (m.type === "seek") { centerOn((m.start + m.end) / 2); }
+  else if (m.type === "error") { flash(m.message, true); }
+}
+
+// ------------------------------------------------------------ status & controls
+function fmtTime(s) {
+  const a = Math.abs(s);
+  if (a >= 1) return s.toFixed(a >= 100 ? 1 : 3) + " s";
+  if (a >= 1e-3) return (s * 1e3).toFixed(3) + " ms";
+  if (a >= 1e-6) return (s * 1e6).toFixed(3) + " µs";
+  return (s * 1e9).toFixed(1) + " ns";
+}
+// Ruler label for time t (s) with enough decimals for tick spacing `step` (s).
+function fmtTick(t, step) {
+  // Past a second, seconds with as many decimals as the spacing needs read
+  // better than "5155834500 ns".
+  if (Math.abs(t) >= 1) return t.toFixed(Math.min(9, Math.max(0, Math.ceil(-Math.log10(step) - 1e-9)))) + " s";
+  for (const [u, f] of [["s", 1], ["ms", 1e3], ["µs", 1e6], ["ns", 1e9]]) {
+    if (step * f >= 1 || u === "ns") {
+      const d = Math.max(0, Math.ceil(-Math.log10(step * f) + 1e-9));
+      return (t * f).toFixed(Math.min(9, d)) + " " + u;
+    }
+  }
+}
+function fmtBytes(n) { return n >= 1e9 ? (n / 1e9).toFixed(2) + " GB" : n >= 1e6 ? (n / 1e6).toFixed(1) + " MB" : (n / 1e3).toFixed(1) + " kB"; }
+let flashTimer = null, flashMsg = null;
+function flash(msg, err) { flashMsg = { msg, err }; clearTimeout(flashTimer); flashTimer = setTimeout(() => { flashMsg = null; renderStatus(); }, 5000); renderStatus(); }
+
+function onStatus(m) {
+  const grew = m.total !== st.total, modeChanged = m.mode !== st.mode || m.file !== st.file;
+  const chChanged = (m.channels | 0) !== st.channels;
+  st = m;
+  if (modeChanged) {
+    follow = m.mode === "live"; rows = null; mini = null; events = [];
+    if (!follow && !(m.mode === "review" && loadHash())) fitAll();
+  }
+  if (chChanged || modeChanged) buildChannels();
+  else updateChannels();
+  $("spiproto").value = m.spiProto || "raw";
+  if (follow && st.total > 0) {
+    const span = Math.max(16, view.end - view.start);
+    view.end = st.total; view.start = Math.max(0, st.total - span);
+  }
+  if (grew || modeChanged) { dirty.main = dirty.events = true; dirty.mini = true; }
+  if (m.mode === "review" && m.loaded < m.total) dirty.mini = true;
+  renderStatus(); resize(); pump();
+}
+
+function renderStatus() {
+  const s = $("status");
+  if (flashMsg) { s.innerHTML = `<span class="${flashMsg.err ? "err" : ""}">${esc(flashMsg.msg)}</span>`; return; }
+  if (st.mode === "idle") { s.innerHTML = "No capture. Record one or open a file." + (st.error ? ` <span class="err">${esc(st.error)}</span>` : ""); return; }
+  if (st.mode === "importing") { s.innerHTML = `Importing <b>${esc(st.file)}</b>: ${(st.imported / 1e6).toFixed(0)} M samples…`; return; }
+  const dur = st.total / st.samplerate;
+  let h = `<b>${esc(st.file || "")}</b> · ${esc(st.device || "")} · ${st.channels} ch @ ${esc(st.rate || "")} · ${fmtTime(dur)}`;
+  if (st.mode === "live") h += st.running ? ` · <span class="rec">● REC</span> ${fmtBytes(st.written || 0)}` : " · stopped";
+  if (st.skipped) h += ` · analysis skipped ${st.skipped} blocks`;
+  if (st.loaded < st.total) h += ` · indexing ${Math.floor(100 * st.loaded / st.total)}%`;
+  if (st.decoded !== undefined && st.decoded < st.total) h += ` · decoding ${Math.floor(100 * st.decoded / st.total)}%`;
+  h += ` · ${st.events | 0} events`;
+  if (st.captureError) h += ` <span class="err">${esc(st.captureError)}</span>`;
+  if (st.error) h += ` <span class="err">${esc(st.error)}</span>`;
+  s.innerHTML = h;
+  $("follow").classList.toggle("on", follow);
+  $("start").disabled = st.mode === "live" && st.running;
+  $("stop").disabled = !(st.mode === "live" && st.running);
+}
+
+function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]); }
+
+function onFiles(m) {
+  const sel = $("files"), cur = sel.value;
+  sel.title = "Captures in " + m.dir;
+  sel.innerHTML = `<option value="">Open capture…</option>` +
+    m.files.map((f) => `<option value="${esc(f.name)}">${esc(f.name)} — ${fmtBytes(f.size)}</option>`).join("");
+  sel.value = cur;
+}
+
+function buildChannels() {
+  const box = $("chans");
+  box.innerHTML = "";
+  box.style.paddingTop = RULER + "px";
+  for (let i = 0; i < (st.channels | 0); i++) {
+    const d = document.createElement("div");
+    d.className = "chan"; d.style.height = ROW + "px";
+    d.innerHTML = `<input value="" spellcheck="false" title="Channel ${i} name"><select>${ROLES.map(([v, t]) => `<option value="${v}">${t}</option>`).join("")}</select>`;
+    const [inp, sel] = d.querySelectorAll("input,select");
+    inp.addEventListener("change", sendNames);
+    sel.addEventListener("change", sendRoles);
+    box.appendChild(d);
+  }
+  updateChannels(true);
+}
+
+function updateChannels(force) {
+  const kids = $("chans").children;
+  (st.chans || []).forEach((c, i) => {
+    const d = kids[i]; if (!d) return;
+    const [inp, sel] = d.querySelectorAll("input,select");
+    if (force || document.activeElement !== inp) inp.value = c.name;
+    const base = (c.role || "").split(":")[0];
+    if (force || document.activeElement !== sel) sel.value = ROLES.some(([v]) => v === base) ? base : "";
+    sel.title = c.suggest ? "auto-detected: " + c.suggest : "";
+    d.style.borderLeft = c.suggest && !c.role ? "3px solid var(--warn)" : "";
+  });
+}
+
+function sendNames() {
+  send({ cmd: "names", names: [...$("chans").querySelectorAll("input")].map((i) => i.value.trim()) });
+}
+
+function sendRoles() {
+  const sels = [...$("chans").querySelectorAll("select")];
+  const roles = sels.map((s) => s.value);
+  // I2C needs its partner channel: pair SCL with the SDA channel.
+  const scl = roles.indexOf("i2c-scl"), sda = roles.indexOf("i2c-sda");
+  if (scl >= 0) roles[scl] = "i2c-scl:" + (sda >= 0 ? sda : scl + 1);
+  if (sda >= 0) roles[sda] = "i2c-sda:" + (scl >= 0 ? scl : Math.max(0, sda - 1));
+  send({ cmd: "roles", roles, spiProto: $("spiproto").value, uartFormat: $("uartfmt").value });
+  dirty.events = true;
+}
+
+function parseRate(s) {
+  s = s.trim(); if (!s) return undefined;
+  const m = /^([\d.]+)\s*([kKmMgG]?)/.exec(s); if (!m) return undefined;
+  return Math.round(parseFloat(m[1]) * ({ "": 1, k: 1e3, K: 1e3, m: 1e6, M: 1e6, g: 1e9, G: 1e9 })[m[2]]);
+}
+
+$("start").onclick = () => {
+  const o = { cmd: "start", device: $("device").value, channels: +$("nch").value };
+  const r = parseRate($("rate").value); if (r) o.samplerate = r;
+  if ($("vth").value) o.threshold = +$("vth").value;
+  follow = true; send(o); flash("starting capture…");
+};
+$("stop").onclick = () => send({ cmd: "stop" });
+$("files").onchange = (e) => { if (e.target.value) { send({ cmd: "open", file: e.target.value }); flash("opening " + e.target.value + "…"); } };
+$("files").onfocus = () => send({ cmd: "files" });
+$("spiproto").onchange = sendRoles;
+$("uartfmt").onchange = sendRoles;
+$("follow").onclick = () => goLive();
+$("fit").onclick = () => fitAll();
+
+// ------------------------------------------------------------ navigation
+function goLive() { follow = true; const span = Math.max(16, view.end - view.start); view.end = st.total; view.start = Math.max(0, st.total - span); changed(); }
+function fitAll() { follow = false; view.start = 0; view.end = Math.max(16, st.total); changed(); }
+function changed() { dirty.main = dirty.events = true; renderStatus(); draw(); pump(); saveHash(); }
+// The view position lives in the URL (#t=<center s>&span=<s>): reloadable, shareable.
+let hashTimer = null;
+function saveHash() {
+  clearTimeout(hashTimer);
+  hashTimer = setTimeout(() => {
+    if (st.mode !== "review" && !(st.mode === "live" && !follow)) return;
+    const sr = st.samplerate, c = (view.start + view.end) / 2 / sr, sp = (view.end - view.start) / sr;
+    history.replaceState(null, "", `#t=${c.toPrecision(10)}&span=${sp.toPrecision(6)}`);
+  }, 300);
+}
+function loadHash() {
+  const h = new URLSearchParams(location.hash.slice(1)), t = parseFloat(h.get("t")), sp = parseFloat(h.get("span"));
+  if (!isFinite(t) || !isFinite(sp) || !st.samplerate) return false;
+  follow = false; view.start = (t - sp / 2) * st.samplerate; view.end = (t + sp / 2) * st.samplerate; clampView();
+  return true;
+}
+function clampView() {
+  let span = Math.max(8, view.end - view.start);
+  span = Math.min(span, Math.max(16, st.total * 1.05));
+  if (view.start < 0) view.start = 0;
+  view.end = view.start + span;
+  if (view.end > st.total && st.total > 0) { view.end = Math.max(st.total, 16); view.start = Math.max(0, view.end - span); }
+}
+function zoomAt(frac, factor) {
+  const span = view.end - view.start, at = view.start + frac * span;
+  const ns = Math.max(8, span * factor);
+  view.start = at - frac * ns; view.end = view.start + ns;
+  follow = follow && factor < 1 && frac > 0.95;
+  clampView(); changed();
+}
+function pan(dsamples) {
+  view.start += dsamples; view.end += dsamples;
+  if (dsamples < 0) follow = false;
+  clampView();
+  if (view.end >= st.total && dsamples > 0 && st.mode === "live") follow = true;
+  changed();
+}
+function centerOn(s) { const span = view.end - view.start; follow = false; view.start = s - span / 2; view.end = s + span / 2; clampView(); changed(); }
+
+const area = () => ({ x: 0, w: wave.clientWidth });
+wave.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  const r = wave.getBoundingClientRect(), frac = (e.clientX - r.left) / r.width;
+  if (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)) pan(((e.shiftKey ? e.deltaY : e.deltaX) / r.width) * (view.end - view.start));
+  else zoomAt(frac, Math.exp(e.deltaY * 0.0015));
+}, { passive: false });
+let drag = null;
+wave.addEventListener("mousedown", (e) => { drag = { x: e.clientX, start: view.start, end: view.end }; wave.classList.add("drag"); });
+window.addEventListener("mouseup", () => { drag = null; wave.classList.remove("drag"); });
+window.addEventListener("mousemove", (e) => {
+  const r = wave.getBoundingClientRect();
+  if (drag) {
+    const d = ((drag.x - e.clientX) / r.width) * (drag.end - drag.start);
+    view.start = drag.start + d; view.end = drag.end + d;
+    if (d < 0) follow = false;
+    clampView(); changed();
+  }
+  if (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) {
+    cursor = view.start + ((e.clientX - r.left) / r.width) * (view.end - view.start); draw();
+  }
+});
+miniC.addEventListener("click", (e) => { const r = miniC.getBoundingClientRect(); centerOn(((e.clientX - r.left) / r.width) * st.total); });
+window.addEventListener("keydown", (e) => {
+  if (e.target.tagName === "INPUT") return;
+  const span = view.end - view.start;
+  if (e.key === "ArrowLeft") pan(-span * 0.2);
+  else if (e.key === "ArrowRight") pan(span * 0.2);
+  else if (e.key === "+" || e.key === "=") zoomAt(0.5, 0.5);
+  else if (e.key === "-") zoomAt(0.5, 2);
+  else if (e.key === "End") goLive();
+  else if (e.key === "Home") { follow = false; view.start = 0; view.end = span; clampView(); changed(); }
+  else if (e.key === "0") fitAll();
+  else if (e.key === "]") send({ cmd: "seek", at: Math.floor((view.start + view.end) / 2), forward: true });
+  else if (e.key === "[") send({ cmd: "seek", at: Math.floor((view.start + view.end) / 2), forward: false });
+  else return;
+  e.preventDefault();
+});
+
+// ------------------------------------------------------------ requests
+function pump() {
+  if (!ws || ws.readyState !== 1 || st.mode === "idle" || st.mode === "importing") return;
+  const cols = Math.max(64, Math.floor(wave.clientWidth));
+  if (dirty.main && !pending.main) {
+    dirty.main = false; pending.main = true;
+    send({ cmd: "view", tag: "main", id: ++reqId, start: Math.floor(view.start), end: Math.ceil(view.end), columns: cols });
+  }
+  if (dirty.events && !pending.events) {
+    dirty.events = false; pending.events = true;
+    send({ cmd: "events", id: ++reqId, start: Math.floor(view.start), end: Math.ceil(view.end), limit: 3000 });
+  }
+  if (dirty.mini && !pending.mini && st.total > 0) {
+    dirty.mini = false; pending.mini = true;
+    send({ cmd: "view", tag: "mini", id: ++reqId, start: 0, end: st.total, columns: Math.max(64, Math.floor(miniC.clientWidth)) });
+  }
+}
+// The minimap only needs occasional refreshes while recording.
+setInterval(() => { if (st.mode === "live" && st.running) { dirty.mini = true; pump(); } }, 1000);
+
+// ------------------------------------------------------------ drawing
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  const h = RULER + (st.channels | 0) * ROW + 8;
+  wave.style.height = h + "px";
+  for (const [c, w, hh] of [[wave, wave.clientWidth, h], [miniC, miniC.clientWidth, miniC.clientHeight]]) {
+    if (c.width !== Math.floor(w * dpr) || c.height !== Math.floor(hh * dpr)) { c.width = Math.floor(w * dpr); c.height = Math.floor(hh * dpr); }
+  }
+  $("wavewrap").style.overflowY = "auto";
+  draw(); drawMini();
+}
+window.addEventListener("resize", () => { dirty.main = dirty.mini = true; resize(); pump(); });
+
+function niceStep(span, px) {
+  const target = span / Math.max(1, px / 110);
+  const p = Math.pow(10, Math.floor(Math.log10(target)));
+  for (const m of [1, 2, 5, 10]) if (m * p >= target) return m * p;
+  return 10 * p;
+}
+
+function draw() {
+  const dpr = window.devicePixelRatio || 1, W = wave.width / dpr, H = wave.height / dpr;
+  const g = wctx; g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.fillStyle = "#0f1115"; g.fillRect(0, 0, W, H);
+  if (st.mode === "idle" || st.mode === "importing") return;
+  const span = view.end - view.start, sr = st.samplerate;
+  const xOf = (s) => ((s - view.start) / span) * W;
+  // Ruler.
+  const stepS = niceStep(span / sr, W), step = stepS * sr;
+  g.fillStyle = "#8a93a5"; g.font = "11px ui-monospace, Menlo, monospace"; g.textBaseline = "middle";
+  for (let t = Math.ceil(view.start / step) * step; t < view.end; t += step) {
+    const x = xOf(t);
+    g.fillStyle = "#262b36"; g.fillRect(x, RULER - 6, 1, H);
+    g.fillStyle = "#8a93a5"; g.fillText(fmtTick(t / sr, stepS), x + 3, RULER / 2);
+  }
+  g.fillStyle = "#262b36"; g.fillRect(0, RULER - 1, W, 1);
+  // Waveforms (from the last response, shifted to the current view).
+  if (rows && rowsFor) {
+    const cols = rowsFor.columns, rs = rowsFor.start, re = rowsFor.end;
+    const colW = (((re - rs) / cols) / span) * W, x0 = xOf(rs);
+    rows.forEach((r, ch) => {
+      const top = RULER + ch * ROW, yH = top + 6, yL = top + ROW - 7;
+      let prev = null;
+      for (let c = 0; c < r.length; c++) {
+        const v = r[c], x = x0 + c * colW, x2 = x + colW;
+        if (x2 < 0 || x > W) { prev = v; continue; }
+        if (v === "?") { g.fillStyle = "#1a1e26"; g.fillRect(x, yH, colW + 0.5, yL - yH); prev = v; continue; }
+        if (v === "x") {
+          g.fillStyle = "rgba(95,184,138,.35)"; g.fillRect(x, yH, colW + 0.5, yL - yH);
+          g.fillStyle = "#5fb88a"; g.fillRect(x, yH, colW + 0.5, 1.5); g.fillRect(x, yL, colW + 0.5, 1.5);
+        } else {
+          g.fillStyle = v === "1" ? "#7ee3a3" : "#3f8f63";
+          g.fillRect(x, v === "1" ? yH : yL, colW + 0.5, 1.5);
+          if ((prev === "0" && v === "1") || (prev === "1" && v === "0")) { g.fillStyle = "#7ee3a3"; g.fillRect(x, yH, 1, yL - yH + 1.5); }
+        }
+        prev = v;
+      }
+    });
+  }
+  // Decoded events on their channel rows.
+  if (events.length) {
+    g.font = "11px ui-monospace, Menlo, monospace";
+    for (const [s, e, ch, , text] of events) {
+      const x = Math.max(-2, xOf(s)), x2 = Math.min(W + 2, Math.max(xOf(e), xOf(s) + 2));
+      if (x2 < 0 || x > W || ch >= st.channels) continue;
+      const top = RULER + ch * ROW + 4, h = ROW - 9;
+      g.fillStyle = "rgba(106,168,255,.20)"; g.fillRect(x, top, x2 - x, h);
+      g.fillStyle = "rgba(106,168,255,.8)"; g.fillRect(x, top, 1, h);
+      if (x2 - x > 14) {
+        g.save(); g.beginPath(); g.rect(x, top, x2 - x, h); g.clip();
+        g.fillStyle = "#e8eefc"; g.fillText(text, x + 3, top + h / 2); g.restore();
+      }
+    }
+  }
+  // Cursor.
+  if (cursor !== null && cursor >= view.start && cursor <= view.end) {
+    const x = xOf(cursor);
+    g.fillStyle = "rgba(240,180,90,.7)"; g.fillRect(x, RULER, 1, H);
+    const label = fmtTime(cursor / sr) + "  #" + Math.floor(cursor);
+    g.font = "11px ui-monospace, Menlo, monospace";
+    const tw = g.measureText(label).width + 8, lx = Math.min(x + 4, W - tw);
+    g.fillStyle = "#2a2416"; g.fillRect(lx, 2, tw, RULER - 6);
+    g.fillStyle = "#f0b45a"; g.fillText(label, lx + 4, RULER / 2 - 1);
+  }
+  if (follow && st.mode === "live") { g.fillStyle = "rgba(255,107,107,.8)"; g.fillRect(W - 2, RULER, 2, H); }
+}
+
+function drawMini() {
+  const dpr = window.devicePixelRatio || 1, W = miniC.width / dpr, H = miniC.height / dpr, g = mctx;
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.fillStyle = "#12151b"; g.fillRect(0, 0, W, H);
+  if (!st.total) return;
+  if (mini && mini.rows.length) {
+    // Activity: how many channels toggle in each column.
+    const cols = mini.columns, cw = ((mini.end - mini.start) / st.total) * W / cols;
+    for (let c = 0; c < cols; c++) {
+      let busy = 0, unk = 0;
+      for (const r of mini.rows) { const v = r[c]; if (v === "x") busy++; else if (v === "?") unk++; }
+      if (unk === mini.rows.length) { g.fillStyle = "#1a1e26"; g.fillRect(c * cw, 0, cw + 0.5, H); continue; }
+      if (busy) { const h = 4 + (H - 8) * busy / mini.rows.length; g.fillStyle = "rgba(95,184,138,.75)"; g.fillRect(c * cw, H - h, cw + 0.5, h); }
+    }
+  }
+  const x = (view.start / st.total) * W, x2 = (view.end / st.total) * W;
+  g.fillStyle = "rgba(106,168,255,.18)"; g.fillRect(x, 0, Math.max(2, x2 - x), H);
+  g.fillStyle = "#6aa8ff"; g.fillRect(x, 0, 1, H); g.fillRect(Math.max(x + 1, x2 - 1), 0, 1, H);
+}
+
+function renderEvents() {
+  $("evcount").textContent = `${events.length}${events.length >= 3000 ? "+" : ""} in view · ${st.events | 0} total`;
+  const sr = st.samplerate;
+  $("events").innerHTML = events.slice(0, 1500).map(([s, e, ch, src, text]) =>
+    `<div data-s="${s}" data-e="${e}"><span class="t">${fmtTime(s / sr)}</span><span class="s" title="${esc(src)}">${esc(shortSrc(src))}</span><span class="x">${esc(text)}</span></div>`).join("");
+}
+// "SD clk=ch7 cmd=ch1 ..." -> "SD", "UART ch2 auto" -> "UART ch2".
+function shortSrc(src) { const w = src.split(" "); return w[1] && /^ch\d+$/.test(w[1]) ? w[0] + " " + w[1] : w[0]; }
+$("events").addEventListener("click", (e) => {
+  const d = e.target.closest("div[data-s]"); if (!d) return;
+  const s = +d.dataset.s, en = +d.dataset.e, span = Math.max(view.end - view.start, (en - s) * 4);
+  follow = false; view.start = (s + en) / 2 - span / 2; view.end = view.start + span; clampView(); changed();
+});
+
+connect();
+resize();
+</script>
+</body>
+</html>

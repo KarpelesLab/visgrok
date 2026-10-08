@@ -79,6 +79,14 @@ Status legend: ✅ done · 🚧 in progress · ⬜ planned
 - ✅ Role assignment: auto-apply, accept per channel, role picker, `--role CH=ROLE`.
 - ✅ Waveform view with zoom, pause; decoded event log; headless mode.
 - ✅ Device options in the CLI (`--channels`, `--threshold`, `--serial`, `--list`, `--emulation`).
+- ✅ Web UI (`visgrok web`): capture control, channel names/roles, live and
+  recorded browsing with zoom/pan/minimap/follow-live, decoded events overlaid
+  and listed; std-only HTTP/WebSocket server; sample store (overview tiles,
+  recent-block ring, on-disk chunk index) keeps the capture independent of the
+  UI (verified: 100 MS/s sustained while hammered; 0.2–7 ms views on a 20 s,
+  4-billion-sample capture); background import of .sr/.vcd and decoding.
+- ⬜ Web UI: persist roles/names per capture, measurements (cursors, deltas,
+  frequency), decoder settings beyond SPI protocol/UART format, SSD1306 screen.
 - ⬜ Triggers (start recording on a condition) and pre-trigger ring buffer.
 - ⬜ Per-decoder settings in the UI (SPI mode/CS polarity, UART parity/inversion,
   MOSI/MISO swap) and persistence of role assignments.

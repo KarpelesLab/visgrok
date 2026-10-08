@@ -3,6 +3,7 @@
 
 mod pipeline;
 mod ui;
+mod web;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -100,6 +101,18 @@ pub struct Args {
 /// Subcommands.
 #[derive(clap::Subcommand, Debug)]
 enum Command {
+    /// Web control mode: serve a browser UI (capture control, roles,
+    /// browsing live and recorded captures) on a local HTTP port.
+    Web {
+        /// Address to listen on (use 0.0.0.0:PORT to allow other machines).
+        #[arg(short, long, default_value = "127.0.0.1:8090")]
+        listen: String,
+        /// Directory for new captures, and listed by "Open capture".
+        #[arg(short, long, default_value = "captures")]
+        dir: PathBuf,
+        /// Capture to open right away (.vgk, .sr, .vcd).
+        open: Option<PathBuf>,
+    },
     /// Convert a capture between formats: .vgk, .sr, .vcd, .bin (by
     /// extension). No analysis; every sample is copied.
     Convert {
@@ -185,6 +198,18 @@ fn open_source(args: &Args) -> Result<Box<dyn Source>, String> {
 
 fn main() {
     let args = Args::parse();
+    if let Some(Command::Web { listen, dir, open }) = &args.command {
+        let opts = web::WebOptions {
+            listen: listen.clone(),
+            dir: dir.clone(),
+            open: open.clone(),
+        };
+        if let Err(e) = web::run(opts) {
+            eprintln!("visgrok: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if let Some(Command::Convert {
         input,
         output,
@@ -332,6 +357,7 @@ fn main() {
         options,
         names,
         lossless_analysis: args.input.is_some(),
+        ..Default::default()
     };
     let pipe = match Pipeline::start(source, args.output.clone(), setup) {
         Ok(p) => p,
