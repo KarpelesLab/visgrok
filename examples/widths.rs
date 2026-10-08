@@ -36,5 +36,31 @@ fn main() -> std::io::Result<()> {
     ms.sort_unstable();
     println!("merged {}: {:?}", ms.len(), &ms[..ms.len().min(60)]);
     println!("ordered: {:?}", &m[..m.len().min(60)]);
+    let n = m.len();
+    let gaps: Vec<(u64, bool)> = (0..n)
+        .filter(|&k| m[k] > 2000)
+        .map(|k| (m[k], ((n - 1 - k) % 2 == 0) != c.level))
+        .collect();
+    println!("level {} gaps (width, high?): {:?}", c.level, gaps);
+    let bit = visgrok::decode::uart::estimate_bit_time(&m, 10.0);
+    println!("estimate_bit_time: {bit:?}");
+    if let Some(bit) = bit {
+        let pairs: Vec<u64> = m.windows(2).map(|p| p[0] + p[1]).filter(|&p| (p as f64) < 21.0 * bit).collect();
+        let two = pairs.iter().filter(|&&p| ((p as f64 / bit) - 2.0).abs() < 0.3).count();
+        println!("pairs {} two {}", pairs.len(), two);
+        let n = m.len();
+        let high = |k: usize| ((n - 1 - k) % 2 == 0) != c.level;
+        let mut longest: Vec<usize> = (0..n).collect();
+        longest.sort_unstable_by_key(|&k| std::cmp::Reverse(m[k]));
+        let skip = &longest[..2.min(n)];
+        let (mut hi, mut all) = (0u64, 0u64);
+        for k in (0..n).filter(|k| !skip.contains(k)) {
+            all += m[k];
+            if high(k) {
+                hi += m[k];
+            }
+        }
+        println!("recent duty {:.2}", hi as f64 / all as f64);
+    }
     Ok(())
 }

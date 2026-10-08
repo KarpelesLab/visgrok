@@ -3,16 +3,16 @@
 use visgrok::EdgeDetector;
 use visgrok::decode::uart::{Parity, Uart, UartConfig};
 use visgrok::decode::{Decoder, Event};
-use visgrok::vgk::VgkReader;
+use visgrok::formats::{ReadOptions, open};
 
 fn main() -> std::io::Result<()> {
     let a: Vec<String> = std::env::args().collect();
-    let mut r = VgkReader::open(&a[1])?;
+    let mut r = open(a[1].as_ref(), &ReadOptions::default())?;
     let ch: u8 = a[2].parse().unwrap();
     let fmt = a.get(3).map_or("8N1", String::as_str).as_bytes().to_vec();
     let from: f64 = a.get(4).map_or(0.0, |s| s.parse().unwrap());
     let to: f64 = a.get(5).map_or(f64::MAX, |s| s.parse().unwrap());
-    let sr = r.meta().samplerate;
+    let sr = r.info().samplerate;
     let mut cfg = UartConfig::auto(ch);
     cfg.data_bits = fmt[0] - b'0';
     cfg.parity = match fmt[1] {
@@ -26,7 +26,7 @@ fn main() -> std::io::Result<()> {
     let mut tr = Vec::new();
     let mut out = Vec::new();
     let mut started = false;
-    while let Some(b) = r.read_block()? {
+    while let Some(b) = r.next_block()? {
         if (b.end() as f64) < from * sr as f64 {
             tr.clear();
             det.process(&b, &mut tr);

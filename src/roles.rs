@@ -128,6 +128,9 @@ pub struct Correlator {
     /// `burst[i][j]`: changes of j shortly after an edge of i (while i is
     /// actively toggling), as opposed to during i's quiet gaps.
     pub(crate) burst: Vec<u64>,
+    /// `near[i][j]`: changes of j within ~64 of i's shortest edge intervals
+    /// of an edge of i (just before/after a burst of i, as CS and D/C do).
+    pub(crate) near: Vec<u64>,
     /// `high_at_rise[i][j]`: rising edges of i at which j is high.
     pub(crate) high_at_rise: Vec<u64>,
     /// Rising edges of each channel.
@@ -153,6 +156,7 @@ impl Correlator {
             n,
             state: 0,
             burst: z.clone(),
+            near: z.clone(),
             high_at_rise: z.clone(),
             rises: vec![0; n],
             last_edge: vec![None; n],
@@ -190,9 +194,14 @@ impl Correlator {
                     if i != j
                         && let Some(le) = self.last_edge[i]
                         && self.min_gap[i] != u64::MAX
-                        && t.at - le <= 4 * self.min_gap[i]
                     {
-                        self.burst[i * n + j] += 1;
+                        let dt = t.at - le;
+                        if dt <= 4 * self.min_gap[i] {
+                            self.burst[i * n + j] += 1;
+                        }
+                        if dt <= 64 * self.min_gap[i] {
+                            self.near[i * n + j] += 1;
+                        }
                     }
                     if i == j || steady >> i & 1 == 0 {
                         continue;
@@ -270,13 +279,41 @@ fn uart_score(c: &ChannelStats, samplerate: u64) -> Option<Suggestion> {
         }
     }
     let w = &w[..];
-    if w.len() < 20 || c.duty()? < 0.5 || !c.level && c.edges() < 40 {
+    if w.len() < 20 {
         return None;
     }
     // Bit time from high+low pulse pairs (robust to slow edges, see
     // estimate_bit_time); traffic must fit it, and bits must be resolvable.
     let bit = crate::decode::uart::estimate_bit_time(w, 10.0)?;
     if bit < 4.0 {
+        return None;
+    }
+    // A UART idles high. Judge it on the recent pulses, leaving out the two
+    // longest (a powered-off stretch, the final idle): overall duty is
+    // misleading when the line sits low while the device is off. Pulses
+    // alternate, and the last one had the opposite of the current level.
+    let n = w.len();
+    let high = |k: usize| (n - 1 - k).is_multiple_of(2) != c.level;
+    let mut longest: Vec<usize> = (0..n).collect();
+    longest.sort_unstable_by_key(|&k| std::cmp::Reverse(w[k]));
+    let skip = &longest[..2.min(n)];
+    let (mut hi, mut all) = (0u64, 0u64);
+    for k in (0..n).filter(|k| !skip.contains(k)) {
+        all += w[k];
+        if high(k) {
+            hi += w[k];
+        }
+    }
+    // Busy traffic sits near 50%; an idle-low line is far below.
+    let idles_high = all > 0 && hi * 5 >= all * 2;
+    if !idles_high {
+        return None;
+    }
+    // Serial data has varied run lengths; a square wave (every pulse pair
+    // the same length) fits any bit time but is a clock, not a UART.
+    let pairs: Vec<u64> = w.windows(2).map(|p| p[0] + p[1]).filter(|&p| (p as f64) < 21.0 * bit).collect();
+    let two = pairs.iter().filter(|&&p| ((p as f64 / bit) - 2.0).abs() < 0.3).count();
+    if pairs.is_empty() || two * 10 >= pairs.len() * 9 {
         return None;
     }
     let measured = samplerate as f64 / bit;
@@ -309,12 +346,19 @@ pub fn detect(stats: &Stats, corr: &Correlator, samplerate: u64) -> Vec<Suggesti
             continue;
         }
         if let (Some(p), Some(j), Some(d)) = (c.median_period(), c.period_jitter(), c.duty()) {
+            // Duty while running (pulse widths against the period), so a
+            // clock that only runs part of the time still qualifies; one that
+            // stopped is still a clock, with less confidence.
+            let _ = d;
+            let mut w = c.recent_widths().to_vec();
+            w.sort_unstable();
+            let typical = w.get(w.len() / 2).copied().unwrap_or(0) as f64 / p as f64;
             let recent = c.last_edge.is_some_and(|e| stats.samples.saturating_sub(e) < 4 * p);
-            if j < 0.05 && (0.2..0.8).contains(&d) && recent {
+            if j < 0.05 && (0.2..0.8).contains(&typical) {
                 let hz = samplerate as f64 / p as f64;
                 out[i] = Suggestion {
                     role: Role::Clock { hz },
-                    confidence: 0.95 - j * 4.0,
+                    confidence: (0.95 - j * 4.0) * if recent { 1.0 } else { 0.8 },
                 };
             }
         }
@@ -367,17 +411,6 @@ pub fn detect(stats: &Stats, corr: &Correlator, samplerate: u64) -> Vec<Suggesti
         };
     }
 
-    // UART lines.
-    for (i, c) in stats.channels.iter().enumerate() {
-        if used[i] || !active[i] || matches!(out[i].role, Role::Clock { .. }) {
-            continue;
-        }
-        if let Some(s) = uart_score(c, samplerate) {
-            used[i] = true;
-            out[i] = s;
-        }
-    }
-
     // SPI: a bursty clock (not free running) on which other lines change
     // almost exclusively while it is in one state, plus an optional CS that
     // changes only while the clock is idle.
@@ -393,7 +426,11 @@ pub fn detect(stats: &Stats, corr: &Correlator, samplerate: u64) -> Vec<Suggesti
             let lo = corr.get(&corr.lo, clk, d);
             let hi = corr.get(&corr.hi, clk, d);
             let tot = lo + hi;
-            if tot >= 16 && (lo.max(hi) as f64 / tot as f64) > 0.97 {
+            // Changes tied to the clock's activity: during bursts (data) or
+            // right around them (CS, D/C). A line that changes far from the
+            // clock (e.g. a UART) is not part of this bus.
+            let near = corr.get(&corr.near, clk, d) as f64 / stats.channels[d].edges().max(1) as f64;
+            if tot >= 16 && (lo.max(hi) as f64 / tot as f64) > 0.97 && near > 0.8 {
                 data.push(d);
             }
         }
@@ -431,6 +468,17 @@ pub fn detect(stats: &Stats, corr: &Correlator, samplerate: u64) -> Vec<Suggesti
                 Role::SpiDc
             };
             out[d] = Suggestion { role, confidence: 0.55 };
+        }
+    }
+
+    // UART lines.
+    for (i, c) in stats.channels.iter().enumerate() {
+        if used[i] || !active[i] || matches!(out[i].role, Role::Clock { .. }) {
+            continue;
+        }
+        if let Some(s) = uart_score(c, samplerate) {
+            used[i] = true;
+            out[i] = s;
         }
     }
 

@@ -134,40 +134,54 @@ pub fn estimate_bit_time(widths: &[u64], max_bits: f64) -> Option<f64> {
     let pairs: Vec<u64> = widths.windows(2).map(|w| w[0] + w[1]).collect();
     let mut sorted = pairs.clone();
     sorted.sort_unstable();
-    // Shortest pair sum that has company (rejects isolated oddities).
-    let base = sorted
-        .iter()
-        .copied()
-        .find(|&p| sorted.iter().filter(|&&x| x * 4 >= p * 3 && x * 4 <= p * 5).count() >= 2)
-        .unwrap_or(sorted[0])
-        .max(2) as f64;
-    // That pair is normally two one-bit pulses; it can be three bits when the
-    // traffic has no isolated single bits. Keep whichever fits better.
-    let mut best: Option<(f64, f64)> = None;
-    for k0 in [2.0, 3.0] {
-        let t0 = base / k0;
-        let (mut sum, mut bits, mut fit, mut total) = (0.0, 0.0, 0usize, 0usize);
-        for &p in &pairs {
-            let r = p as f64 / t0;
-            if r > 2.0 * max_bits + 0.5 {
-                continue;
-            }
-            total += 1;
-            let k = r.round().max(2.0);
-            if (r - k).abs() < 0.25 {
-                fit += 1;
-                sum += p as f64;
-                bits += k;
-            }
+    // Candidate bit times: every pair-sum cluster (values with company)
+    // divided by 2 or 3 bits.
+    let mut clusters: Vec<u64> = Vec::new();
+    for &p in &sorted {
+        let company = sorted.iter().filter(|&&x| x * 4 >= p * 3 && x * 4 <= p * 5).count() >= 2;
+        if company && clusters.last().is_none_or(|&c| p * 4 > c * 5) {
+            clusters.push(p);
         }
-        if total >= 3 && fit * 5 >= total * 4 {
-            let ratio = fit as f64 / total as f64;
-            if best.is_none_or(|(r, _)| ratio > r + 0.02) {
-                best = Some((ratio, sum / bits));
+    }
+    if clusters.is_empty() {
+        clusters.push(sorted[0].max(2));
+    }
+    // Any divisor of the true bit time also fits the short pulses (two
+    // 100-sample bits are fifteen 13.3-sample bits), and with few pulses a
+    // multiple may fit too. Keep, among candidates that fit well and explain
+    // most pulses, the largest one that explains nearly as many pairs as the
+    // best candidate does.
+    let mut accepted: Vec<(f64, usize)> = Vec::new();
+    for &c in &clusters {
+        for k0 in [2.0, 3.0] {
+            let t0 = c as f64 / k0;
+            let (mut sum, mut bits, mut fit, mut total) = (0.0, 0.0, 0usize, 0usize);
+            for &p in &pairs {
+                let r = p as f64 / t0;
+                // A pair is at least two bits: much shorter pairs belong to
+                // another rate (or noise) and don't count against this one.
+                if !(1.5..=2.0 * max_bits + 0.5).contains(&r) {
+                    continue;
+                }
+                total += 1;
+                let k = r.round().max(2.0);
+                if (r - k).abs() < 0.25 {
+                    fit += 1;
+                    sum += p as f64;
+                    bits += k;
+                }
+            }
+            if total >= 3 && fit * 5 >= total * 4 && fit * 2 >= pairs.len() {
+                accepted.push((sum / bits, fit));
             }
         }
     }
-    best.map(|(_, t)| t)
+    let max_fit = accepted.iter().map(|a| a.1).max()?;
+    accepted
+        .iter()
+        .filter(|a| a.1 * 10 >= max_fit * 9)
+        .map(|a| a.0)
+        .fold(None, |b: Option<f64>, t| Some(b.map_or(t, |b| b.max(t))))
 }
 
 /// Result of decoding one frame.
@@ -476,10 +490,11 @@ impl Uart {
                 match self.detect_format(bit, now) {
                     Detect::Wait => return,
                     Detect::NoFit => {
-                        // Locked on something that isn't serial data: drop
-                        // this burst and start over.
-                        let (_, n, _) = self.estimate_burst(0, true);
-                        self.edges.drain(..n.max(1).min(self.edges.len()));
+                        // The lock was on something that isn't serial data
+                        // (noise before real traffic): forget it, drop only
+                        // the first frame start and estimate again, so a
+                        // real frame right after the noise survives.
+                        self.edges.pop_front();
                         if self.cfg.baud.is_none() {
                             self.bit = None;
                         }

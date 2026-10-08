@@ -107,6 +107,50 @@ impl EdgeDetector {
     }
 }
 
+/// Removes glitches: two edges of the same channel less than `glitch`
+/// samples apart cancel each other. Returns the remaining changes, starting
+/// from `state` (the line state before the first transition), and the state
+/// after them.
+pub fn deglitch(transitions: &[Transition], state: Sample, glitch: u64) -> (Vec<Transition>, Sample) {
+    if glitch == 0 || transitions.is_empty() {
+        let end = transitions.last().map_or(state, |t| t.now);
+        return (transitions.to_vec(), end);
+    }
+    // Mark edges to drop, per channel.
+    let n = transitions.len();
+    let mut drop = vec![0 as Sample; n];
+    let mut last: [Option<usize>; 32] = [None; 32];
+    for (k, t) in transitions.iter().enumerate() {
+        let mut c = t.changed();
+        while c != 0 {
+            let ch = c.trailing_zeros() as usize;
+            c &= c - 1;
+            match last[ch] {
+                Some(j) if drop[j] >> ch & 1 == 0 && t.at - transitions[j].at < glitch => {
+                    drop[j] |= 1 << ch;
+                    drop[k] |= 1 << ch;
+                    last[ch] = None;
+                }
+                _ => last[ch] = Some(k),
+            }
+        }
+    }
+    let mut out = Vec::with_capacity(n);
+    let mut cur = state;
+    for (t, d) in transitions.iter().zip(&drop) {
+        let next = cur ^ (t.changed() & !d);
+        if next != cur {
+            out.push(Transition {
+                at: t.at,
+                prev: cur,
+                now: next,
+            });
+            cur = next;
+        }
+    }
+    (out, cur)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,6 +224,22 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn glitches_cancel() {
+        let tr = vec![
+            Transition { at: 100, prev: 0, now: 1 },
+            Transition { at: 101, prev: 1, now: 0 }, // 1-sample pulse on ch0
+            Transition { at: 200, prev: 0, now: 2 },
+            Transition { at: 300, prev: 2, now: 0 },
+        ];
+        let (out, end) = deglitch(&tr, 0, 5);
+        assert_eq!(
+            out,
+            vec![Transition { at: 200, prev: 0, now: 2 }, Transition { at: 300, prev: 2, now: 0 }]
+        );
+        assert_eq!(end, 0);
     }
 
     #[test]

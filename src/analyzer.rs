@@ -3,7 +3,7 @@
 
 use std::collections::VecDeque;
 
-use crate::block::Block;
+use crate::block::{Block, Sample};
 use crate::decode::i2c::I2c;
 use crate::decode::iso7816::Iso7816;
 use crate::decode::sd::{Sd, SdConfig};
@@ -193,6 +193,10 @@ pub struct Analyzer {
     pub gaps: u64,
     /// Channels excluded from analysis (still recorded).
     ignored: u32,
+    /// Pulses up to this many samples are glitches (25 ns).
+    glitch: u64,
+    /// Line state after the last glitch-filtered transition.
+    clean_state: Sample,
 }
 
 impl Analyzer {
@@ -214,6 +218,8 @@ impl Analyzer {
             next: None,
             gaps: 0,
             ignored: 0,
+            glitch: (samplerate as f64 * 25e-9) as u64,
+            clean_state: 0,
         }
     }
 
@@ -358,9 +364,13 @@ impl Analyzer {
 
         self.scratch.clear();
         self.edges.process(block, &mut self.scratch);
-        self.stats.process(&self.scratch);
+        // Statistics and bus correlation see glitch-free signals; decoders
+        // and the waveform get the raw transitions.
+        let (clean, end) = crate::edges::deglitch(&self.scratch, self.clean_state, self.glitch);
+        self.clean_state = end;
+        self.stats.process(&clean);
         self.stats.advance(block.end());
-        self.corr.process(&self.scratch);
+        self.corr.process(&clean);
 
         let mut produced: Vec<Tagged> = Vec::new();
         for (di, d) in self.decoders.iter_mut().enumerate() {
@@ -397,6 +407,7 @@ impl Analyzer {
         let mask = self.mask();
         self.edges = EdgeDetector::new(mask);
         let s = first & mask;
+        self.clean_state = s;
         if !self.stats.is_initialized() {
             self.stats.init(s);
             self.corr.init(s);
