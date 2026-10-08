@@ -9,3 +9,23 @@ signal analysis and a terminal UI.
 
 See [docs/PROTOCOL.md](docs/PROTOCOL.md) for the USB protocol and
 [docs/ROADMAP.md](docs/ROADMAP.md) for the plan.
+
+## Usage
+
+```sh
+cargo build --release
+./target/release/visgrok --list
+# 16 channels at 50 MHz, 1.65 V threshold, record to disk, auto-detect roles:
+./target/release/visgrok -c 16 -s 50M -t 1.65 -o capture.sr --auto
+# No hardware: synthetic UART/I2C/SPI/clock signals
+./target/release/visgrok --demo --auto
+# Verify the USB link: device test pattern checked sample by sample
+cargo run --release -p visgrok --example selftest -- 16 100000000 5
+```
+
+Recordings are sigrok session files and open in PulseView / `sigrok-cli -i`.
+
+TUI keys: `↑↓` select channel, `a` apply auto-detected roles, `A` accept the
+selected channel's suggestion, `u` UART (again to cycle baud), `i` I2C on the
+selected channel and the next, `s` SPI on four channels starting at the
+selection, `x` clear role, `+`/`-` zoom, space pause, `r` reset stats, `q` quit.

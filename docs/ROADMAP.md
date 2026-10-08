@@ -7,9 +7,9 @@ Status legend: ✅ done · 🚧 in progress · ⬜ planned
 
 ## Phase 0: protocol analysis
 - ✅ Workspace skeleton (`visgrok` library, `visgrok-tui` binary).
-- 🚧 Document the USB protocol of the SLogic family from the libsigrok driver,
-  Sipeed's sources and the connected SLogic16 U3 → [PROTOCOL.md](PROTOCOL.md).
-- ⬜ Verify each request and the sample format on hardware.
+- ✅ Document the USB protocol of the SLogic family from Sipeed's libsigrok fork,
+  their other sources and the connected SLogic16 U3 → [PROTOCOL.md](PROTOCOL.md).
+- ✅ Verify requests, sample format, rate encoding and quirks on a SLogic16 U3.
 
 ## Phase 1: hardware-independent core
 - ✅ Canonical sample blocks (sigrok-compatible 1/2-byte units).
@@ -23,14 +23,25 @@ Status legend: ✅ done · 🚧 in progress · ⬜ planned
 - ✅ Synthetic source for development without hardware.
 
 ## Phase 2: SLogic driver
-- ⬜ Device discovery (VID/PID table, serial selection) via `rawusb`.
-- ⬜ Configuration: sample rate, channel count/bit width, thresholds.
-- ⬜ Streaming acquisition with several asynchronous bulk transfers in flight,
-  sized to the sample rate; explicit overflow detection.
-- ⬜ Clean start/stop/reset so the device can be reused without replugging.
-- ⬜ Wire format → canonical block conversion (4/8/16-channel modes).
-- ⬜ Hardware tests: loopback of a known signal, long-duration soak at max
-  sustainable rate, stop/start cycling, unplug during capture.
+- ✅ Device discovery (VID/PID table, bootloader detection, serial selection) via `rawusb`.
+- ✅ SET_CONFIGURATION(1) when unconfigured, reset on open (device may be left in reset).
+- ✅ Register/AUX configuration with ready, selector-echo and read-back checks;
+  sample rate validated against the 8-bit divider and the bandwidth limit
+  (no silent fallback to the maximum rate, unlike sigrok).
+- ✅ Streaming with a ring of async bulk transfers resubmitted from the callback,
+  ~40 ms per transfer, bounded queue, idle/stall detection.
+- ✅ 4-byte head artifact dropped once per acquisition (byte counter);
+  4/8/16-channel unpacking with odd-byte carry.
+- ✅ Start-up rate verification with automatic restart (device sometimes latches
+  the previous sample rate; PROTOCOL.md §6.3).
+- ✅ `examples/selftest`: emulation-pattern capture checked sample by sample.
+  Results on macOS: 0 errors up to 200 MB/s in all modes; at 400 MB/s
+  (16ch@200M, 8ch@400M, 4ch@800M) ~5–10 short gaps per GB remain.
+- ⬜ Investigate the residual 400 MB/s losses (Linux comparison; rawusb macOS
+  submission path; larger/fewer transfers).
+- ⬜ Combo 8 support is implemented from source but untested (no hardware).
+- ⬜ SLogic32 U3: 32-channel mode.
+- ⬜ Hardware tests with real signals in 4/8-channel modes; unplug during capture.
 
 ## Phase 3: TUI and pipeline
 - ✅ Acquisition / writer / analysis threads; the writer is lossless (back-pressure),
@@ -38,7 +49,7 @@ Status legend: ✅ done · 🚧 in progress · ⬜ planned
 - ✅ Live channel table (level, edges, frequency, duty, min pulse, role).
 - ✅ Role assignment: auto-apply, accept per channel, manual UART/I2C/SPI.
 - ✅ Waveform view with zoom, pause; decoded event log; headless mode.
-- ⬜ Device options in the CLI (`--channels`, threshold, device serial).
+- ✅ Device options in the CLI (`--channels`, `--threshold`, `--serial`, `--list`, `--emulation`).
 - ⬜ Triggers (start recording on a condition) and pre-trigger ring buffer.
 - ⬜ Per-decoder settings in the UI (SPI mode/CS polarity, UART parity/inversion,
   MOSI/MISO swap) and persistence of role assignments.
