@@ -100,6 +100,8 @@ pub struct Analyzer {
     next: Option<u64>,
     /// Samples skipped because blocks were dropped before analysis.
     pub gaps: u64,
+    /// Channels excluded from analysis (still recorded).
+    ignored: u16,
 }
 
 impl Analyzer {
@@ -120,7 +122,26 @@ impl Analyzer {
             annotation_count: 0,
             next: None,
             gaps: 0,
+            ignored: 0,
         }
+    }
+
+    fn mask(&self) -> u16 {
+        let all = if self.channels >= 16 { 0xffff } else { (1u16 << self.channels) - 1 };
+        all & !self.ignored
+    }
+
+    /// Excludes channels from analysis. A fast free-running clock produces
+    /// an edge every few samples; ignoring it keeps decoding of the other
+    /// channels real-time. Ignored channels read as constant 0.
+    pub fn set_ignored(&mut self, mask: u16) {
+        self.ignored = mask;
+        self.next = None; // restart edge tracking with the new mask
+    }
+
+    /// Channels excluded from analysis.
+    pub fn ignored(&self) -> u16 {
+        self.ignored
     }
 
     /// Sample rate in Hz.
@@ -266,7 +287,7 @@ impl Analyzer {
     }
 
     fn restart(&mut self, first: u16, at: u64) {
-        let mask = if self.channels >= 16 { 0xffff } else { (1u16 << self.channels) - 1 };
+        let mask = self.mask();
         self.edges = EdgeDetector::new(mask);
         let s = first & mask;
         if !self.stats.is_initialized() {

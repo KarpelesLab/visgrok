@@ -21,6 +21,19 @@ use visgrok::srzip::SrZipWriter;
 use visgrok::vgk::{Meta, VgkWriter};
 use visgrok::{Block, CaptureInfo, Source};
 
+/// What to start a pipeline with besides the source and output.
+#[derive(Default)]
+pub struct Setup {
+    /// Extra metadata recorded in `.vgk` files.
+    pub extra: Vec<(String, String)>,
+    /// Initial role per channel.
+    pub roles: Vec<Option<Role>>,
+    /// Decoder settings.
+    pub options: DecoderOptions,
+    /// Channel names (`None`: `D<n>`).
+    pub names: Vec<Option<String>>,
+}
+
 /// Shared state between the pipeline threads and the UI.
 pub struct Pipeline {
     pub info: CaptureInfo,
@@ -28,6 +41,8 @@ pub struct Pipeline {
     pub analyzer: Mutex<Analyzer>,
     /// User-assigned roles; `None` means "not assigned".
     pub roles: Mutex<Vec<Option<Role>>>,
+    /// Channel names (default `D<n>`).
+    pub names: Vec<String>,
     /// Decoder settings (SPI mode/protocol, UART auto-baud).
     pub options: Mutex<DecoderOptions>,
     samples: AtomicU64,
@@ -51,20 +66,22 @@ impl Pipeline {
     pub fn start(
         source: Box<dyn Source>,
         output: Option<PathBuf>,
-        extra: Vec<(String, String)>,
-        roles: Vec<Option<Role>>,
-        options: DecoderOptions,
+        setup: Setup,
     ) -> Result<Arc<Pipeline>, String> {
         let info = source.info();
-        let mut roles = roles;
+        let Setup { extra, mut roles, options, names } = setup;
         roles.resize(info.channels, None);
+        let names: Vec<String> = (0..info.channels)
+            .map(|i| names.get(i).cloned().flatten().unwrap_or_else(|| format!("D{i}")))
+            .collect();
         let writer = match &output {
-            Some(p) => Some(Recorder::create(p, &info, extra).map_err(|e| format!("{}: {e}", p.display()))?),
+            Some(p) => Some(Recorder::create(p, &info, &names, extra).map_err(|e| format!("{}: {e}", p.display()))?),
             None => None,
         };
         let pipe = Pipeline {
             analyzer: Mutex::new(Analyzer::new(info.channels, info.samplerate)),
             roles: Mutex::new(roles),
+            names,
             options: Mutex::new(options),
             info,
             output,
@@ -366,13 +383,18 @@ enum Recorder {
 }
 
 impl Recorder {
-    fn create(path: &std::path::Path, info: &CaptureInfo, extra: Vec<(String, String)>) -> std::io::Result<Recorder> {
+    fn create(
+        path: &std::path::Path,
+        info: &CaptureInfo,
+        names: &[String],
+        extra: Vec<(String, String)>,
+    ) -> std::io::Result<Recorder> {
         if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("sr")) {
-            let names: Vec<String> = (0..info.channels).map(|i| format!("D{i}")).collect();
-            Ok(Recorder::Sr(SrZipWriter::create(path, &names, info.samplerate, info.unit_size)?))
+            Ok(Recorder::Sr(SrZipWriter::create(path, names, info.samplerate, info.unit_size)?))
         } else {
             let mut meta = Meta::from_info(info);
             meta.extra = extra;
+            meta.names = names.to_vec();
             Ok(Recorder::Vgk(VgkWriter::create(path, &meta)?))
         }
     }

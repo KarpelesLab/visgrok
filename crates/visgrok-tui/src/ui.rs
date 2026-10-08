@@ -14,6 +14,8 @@ use visgrok::decode::DisplayView;
 use visgrok::roles::{BAUD_RATES, Role, Suggestion, fmt_hz};
 
 use crate::pipeline::{Pipeline, format_annotation};
+#[cfg(test)]
+use crate::pipeline::Setup;
 
 /// UI state that is not part of the pipeline.
 struct Ui {
@@ -197,7 +199,7 @@ fn event_loop(term: &mut DefaultTerminal, pipe: &Pipeline, auto: bool) -> io::Re
                         fix_i2c_pairs(&mut roles);
                     }
                     pipe.rebuild_decoders();
-                    ui.flash(&format!("D{sel}: {}", PICKS[i]));
+                    ui.flash(&format!("{}: {}", pipe.names[sel], PICKS[i]));
                     ui.picker = None;
                 }
                 KeyCode::Esc | KeyCode::Char('q') => ui.picker = None,
@@ -361,7 +363,7 @@ fn draw(f: &mut Frame, pipe: &Pipeline, ui: &mut Ui, snap: &Snapshot) {
         let r = Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h };
         let items: Vec<ListItem> = PICKS.iter().map(|s| ListItem::new(*s)).collect();
         let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title(format!(" Role for D{sel} ")))
+            .block(Block::default().borders(Borders::ALL).title(format!(" Role for {} (D{sel}) ", pipe.names[sel])))
             .highlight_style(Style::default().bg(Color::Blue).add_modifier(Modifier::BOLD));
         f.render_widget(Clear, r);
         f.render_stateful_widget(list, r, p);
@@ -435,6 +437,7 @@ fn draw_header(f: &mut Frame, area: Rect, pipe: &Pipeline, ui: &Ui, snap: &Snaps
 fn draw_channels(f: &mut Frame, area: Rect, pipe: &Pipeline, ui: &mut Ui, snap: &Snapshot) {
     let sr = pipe.info.samplerate as f64;
     let roles = pipe.roles.lock().unwrap().clone();
+    let name_w = pipe.names.iter().map(|n| n.chars().count()).max().unwrap_or(2).max(2) as u16 + 1;
     let rows = snap.channels.iter().enumerate().map(|(i, c)| {
         let level = snap.state.map(|s| s >> i & 1 != 0);
         let lvl = match level {
@@ -456,7 +459,7 @@ fn draw_channels(f: &mut Frame, area: Rect, pipe: &Pipeline, ui: &mut Ui, snap: 
             _ => Span::raw(""),
         };
         Row::new(vec![
-            Cell::from(format!("D{i}")),
+            Cell::from(pipe.names[i].clone()),
             Cell::from(lvl),
             Cell::from(format!("{}", c.edges)),
             Cell::from(fmt_rate(ui.edge_rate[i])),
@@ -469,7 +472,7 @@ fn draw_channels(f: &mut Frame, area: Rect, pipe: &Pipeline, ui: &mut Ui, snap: 
     let table = Table::new(
         rows,
         [
-            Constraint::Length(4),
+            Constraint::Length(name_w),
             Constraint::Length(5),
             Constraint::Length(12),
             Constraint::Length(10),
@@ -494,7 +497,7 @@ fn draw_wave(f: &mut Frame, area: Rect, pipe: &Pipeline, ui: &Ui, snap: &Snapsho
     let block = Block::default().borders(Borders::ALL).title(title);
     let inner = block.inner(area);
     f.render_widget(block, area);
-    let label_w = 4u16;
+    let label_w = pipe.names.iter().map(|n| n.chars().count()).max().unwrap_or(2) as u16 + 1;
     let cols = inner.width.saturating_sub(label_w) as u64;
     if cols == 0 {
         return;
@@ -534,7 +537,7 @@ fn draw_wave(f: &mut Frame, area: Rect, pipe: &Pipeline, ui: &Ui, snap: &Snapsho
         }
         let color = if snap.channels.get(ch).is_some_and(|c| c.edges > 0) { Color::Green } else { Color::DarkGray };
         lines.push(Line::from(vec![
-            Span::styled(format!("D{ch:<2} "), Style::default().fg(Color::Gray)),
+            Span::styled(format!("{:<w$}", pipe.names[ch], w = label_w as usize), Style::default().fg(Color::Gray)),
             Span::styled(s, Style::default().fg(color)),
         ]));
     }
@@ -574,7 +577,7 @@ mod tests {
     /// `--nocapture` to eyeball the layout.
     #[test]
     fn renders_demo() {
-        let pipe = Pipeline::start(Box::new(Synth::new(20_000_000, Some(20_000_000))), None, Vec::new(), Vec::new(), Default::default()).unwrap();
+        let pipe = Pipeline::start(Box::new(Synth::new(20_000_000, Some(20_000_000))), None, Setup::default()).unwrap();
         while !pipe.finished() {
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -614,7 +617,11 @@ mod tests {
         use visgrok::analyzer::{DecoderOptions, SpiProtocol};
         let roles = vec![Some(Role::Uart { baud: 0 }), Some(Role::SpiClk), Some(Role::SpiMosi), Some(Role::SpiDc), Some(Role::SpiCs)];
         let opts = DecoderOptions { spi_protocol: SpiProtocol::Ssd1306 { width: 128, height: 64 }, ..Default::default() };
-        let pipe = Pipeline::start(Box::new(Synth::device(50_000_000, Some(15_000_000))), None, Vec::new(), roles, opts).unwrap();
+        let pipe = Pipeline::start(
+            Box::new(Synth::device(50_000_000, Some(15_000_000))),
+            None,
+            Setup { roles, options: opts, ..Default::default() },
+        ).unwrap();
         while !pipe.finished() {
             std::thread::sleep(Duration::from_millis(50));
         }

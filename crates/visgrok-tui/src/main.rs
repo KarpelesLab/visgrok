@@ -15,7 +15,7 @@ use visgrok::slogic::{Config, Pattern, SLogic};
 use visgrok::synth::Synth;
 use visgrok::vgk::VgkReader;
 
-use crate::pipeline::Pipeline;
+use crate::pipeline::{Pipeline, Setup};
 
 /// Command-line options.
 #[derive(Parser, Debug)]
@@ -66,6 +66,9 @@ pub struct Args {
     /// `--role 6=i2c-scl:7 --role 7=i2c-sda:6`. Repeatable.
     #[arg(short, long = "role", value_name = "CH=ROLE")]
     roles: Vec<String>,
+    /// Name a channel, e.g. `--name 0=CLK`. Used in the UI and recorded files.
+    #[arg(short, long = "name", value_name = "CH=NAME")]
+    names: Vec<String>,
     /// SPI mode 0..3 (default: clock polarity from its idle level, CPHA 0).
     #[arg(long)]
     spi_mode: Option<u8>,
@@ -185,7 +188,23 @@ fn main() {
         spi_protocol: args.spi_proto,
         uart_auto: !args.uart_fixed,
     };
-    let pipe = match Pipeline::start(source, args.output.clone(), extra, roles, options) {
+    let mut names: Vec<Option<String>> = Vec::new();
+    for spec in &args.names {
+        let Some((ch, name)) = spec.split_once('=') else {
+            eprintln!("visgrok: --name {spec:?}: expected CH=NAME");
+            std::process::exit(2);
+        };
+        let Ok(ch) = ch.trim_start_matches(['D', 'd']).parse::<usize>() else {
+            eprintln!("visgrok: --name {spec:?}: bad channel");
+            std::process::exit(2);
+        };
+        if names.len() <= ch {
+            names.resize(ch + 1, None);
+        }
+        names[ch] = Some(name.to_string());
+    }
+    let setup = Setup { extra, roles, options, names };
+    let pipe = match Pipeline::start(source, args.output.clone(), setup) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("visgrok: {e}");
