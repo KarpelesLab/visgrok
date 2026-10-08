@@ -84,6 +84,7 @@ footer { display: grid; grid-template-columns: 1fr; border-top: 1px solid var(--
     <select id="marks" title="Bookmarks (b: add at cursor, B: remove nearest)"><option value="">Bookmarks…</option></select>
   </div>
   <div class="group">
+    <button id="auto" title="Assign detected roles (UART, SPI, I2C) to unassigned channels">Auto roles</button>
     <button id="follow" title="Keep the newest samples in view (End)">⏵ Live</button>
     <button id="fit" title="Show the whole capture (0)">Fit</button>
   </div>
@@ -277,6 +278,7 @@ function updateChannels(force) {
     const base = (c.role || "").split(":")[0];
     if (force || document.activeElement !== sel) sel.value = ROLES.some(([v]) => v === base) ? base : "";
     sel.title = c.suggest ? "auto-detected: " + c.suggest : "";
+    inp.title = c.suggest ? `Channel ${i} · detected: ${c.suggest}` : `Channel ${i}`;
     d.style.borderLeft = c.suggest && !c.role ? "3px solid var(--warn)" : "";
   });
 }
@@ -315,6 +317,7 @@ $("spiproto").onchange = sendRoles;
 $("uartfmt").onchange = sendRoles;
 $("uartproto").onchange = sendRoles;
 $("follow").onclick = () => goLive();
+$("auto").onclick = () => { send({ cmd: "auto" }); flash("assigning detected roles…"); };
 $("fit").onclick = () => fitAll();
 
 // ------------------------------------------------------------ navigation
@@ -440,7 +443,13 @@ function onDisplay(m) {
   $("scrtitle").textContent = `${m.title} · update ${m.update} · ${fmtTime(m.sample / st.samplerate)}${m.on ? "" : " · off"}`;
   pumpScreen();
 }
+function cursorEvent() {
+  if (cursor === null) return;
+  const hit = events.find(([s, e]) => cursor >= s && cursor <= Math.max(e, s + (view.end - view.start) / 400));
+  $("evcount").textContent = hit ? `at cursor: ${shortSrc(hit[3])} ${hit[4]}` : `${events.length}${events.length >= 3000 ? "+" : ""} in view · ${st.events | 0} total`;
+}
 function cursorLevels() {
+  cursorEvent();
   const kids = $("chans").children;
   let col = -1;
   if (rows && rowsFor && cursor !== null) {

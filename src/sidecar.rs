@@ -220,7 +220,12 @@ impl Sidecar {
         for (i, r) in self.roles.iter().enumerate() {
             match r {
                 Some(Role::Uart { baud }) => out.push(format!(
-                    "UART on {} ({}, {})",
+                    "{} on {} ({}, {})",
+                    if self.options.uart_protocol == UartProtocol::Iso7816 {
+                        "ISO 7816 (UART)"
+                    } else {
+                        "UART"
+                    },
                     name(i),
                     if *baud == 0 {
                         "auto baud".to_string()

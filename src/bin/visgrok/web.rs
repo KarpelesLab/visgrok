@@ -80,6 +80,8 @@ struct Session {
     notes: Mutex<String>,
     /// Recording settings: device, sample rate, threshold.
     recording: Mutex<(Option<String>, Option<u64>, Option<f64>)>,
+    /// Auto-detected roles of the reviewed capture (from the background pass).
+    suggestions: Arc<Mutex<Vec<Suggestion>>>,
 }
 
 fn role_id(r: &Option<Role>) -> String {
@@ -302,6 +304,7 @@ impl Session {
     /// differs for imported .sr/.vcd files) and holds the sidecar.
     fn review(&self, vgk: &Path, original: &Path) -> Result<(), String> {
         let store = SampleStore::open(vgk).map_err(|e| format!("{}: {e}", vgk.display()))?;
+        self.suggestions.lock().unwrap().clear();
         self.load_sidecar(original, store.info().all_names());
         store.set_names(self.names.lock().unwrap().clone());
         *self.mode.lock().unwrap() = Mode::Review { store, decode: None };
@@ -331,9 +334,8 @@ impl Session {
         store.clear_events();
         let info = store.info();
         let roles = self.effective_roles(info.channels);
-        if roles.iter().all(|r| matches!(r, Role::Unknown | Role::Idle)) {
-            return;
-        }
+        // The pass runs even without roles: it also detects them.
+        let suggestions = self.suggestions.clone();
         let opts = self.options.lock().unwrap().clone();
         let job = DecodeJob {
             cancel: Arc::new(AtomicBool::new(false)),
@@ -382,8 +384,74 @@ impl Session {
                 );
                 progress.store(b.end(), Ordering::SeqCst);
             }
+            *suggestions.lock().unwrap() = a.suggest();
             progress.store(u64::MAX, Ordering::SeqCst);
         });
+    }
+
+    /// Decodes the start of the reviewed capture as raw SPI and checks
+    /// whether the command bytes (D/C low) include typical SSD1306 setup
+    /// commands (display off/on, multiplex ratio, charge pump, addressing).
+    fn looks_like_ssd1306(&self) -> bool {
+        let Some(store) = self.store() else { return false };
+        let info = store.info();
+        let roles = self.effective_roles(info.channels);
+        let Ok(mut r) = VgkReader::open(store.path()) else { return false };
+        let mut a = Analyzer::new(info.channels, info.samplerate);
+        let d = a.decoders_for_roles(&roles, &DecoderOptions::default());
+        a.set_decoders(d);
+        let mut cmds = std::collections::HashSet::new();
+        let mut words = 0;
+        while let Ok(Some(b)) = r.read_block() {
+            a.process(&b);
+            for t in a.annotations.drain(..) {
+                if let visgrok::decode::Event::SpiWord {
+                    mosi: Some(m),
+                    dc: Some(false),
+                    ..
+                } = t.annotation.event
+                {
+                    cmds.insert(m as u8);
+                }
+                words += 1;
+            }
+            if words > 4096 {
+                break;
+            }
+        }
+        let typical = [0xae, 0xaf, 0xa8, 0x8d, 0x20, 0xd5, 0xd9, 0xda, 0xdb, 0x81, 0xa1, 0xc8];
+        typical.iter().filter(|c| cmds.contains(c)).count() >= 4
+    }
+
+    /// Whether the reviewed capture's UART starts like a smart card: even
+    /// parity framing and a first byte of 0x3B or 0x3F (an ATR's TS).
+    fn looks_like_iso7816(&self) -> bool {
+        let Some(store) = self.store() else { return false };
+        let info = store.info();
+        let roles: Vec<Role> = self
+            .effective_roles(info.channels)
+            .into_iter()
+            .map(|r| if matches!(r, Role::Uart { .. }) { r } else { Role::Unknown })
+            .collect();
+        let Ok(mut r) = VgkReader::open(store.path()) else { return false };
+        let mut a = Analyzer::new(info.channels, info.samplerate);
+        let d = a.decoders_for_roles(&roles, &DecoderOptions::default());
+        a.set_decoders(d);
+        let (mut even, mut first) = (false, None);
+        while let Ok(Some(b)) = r.read_block() {
+            a.process(&b);
+            for t in a.annotations.drain(..) {
+                match t.annotation.event {
+                    visgrok::decode::Event::UartFormat { format } => even = format.starts_with("8E"),
+                    visgrok::decode::Event::UartByte { value, .. } if first.is_none() => first = Some(value),
+                    _ => {}
+                }
+            }
+            if first.is_some() {
+                break;
+            }
+        }
+        even && matches!(first, Some(0x3b | 0x3f))
     }
 
     fn status_json(&self) -> String {
@@ -420,7 +488,7 @@ impl Session {
                     let p = j.progress.load(Ordering::SeqCst);
                     o.num("decoded", if p == u64::MAX { store.total() as f64 } else { p as f64 });
                 }
-                (Some(store), Vec::new(), None)
+                (Some(store), self.suggestions.lock().unwrap().clone(), None)
             }
         };
         if let Some(s) = store {
@@ -639,6 +707,54 @@ impl Session {
                     items.join(",")
                 ))
             }
+            "auto" => {
+                // Give unassigned channels their detected role.
+                let sugg: Vec<Suggestion> = match &*self.mode.lock().unwrap() {
+                    Mode::Live { pipe, .. } => pipe.analyzer.lock().unwrap().suggest(),
+                    _ => self.suggestions.lock().unwrap().clone(),
+                };
+                {
+                    let mut roles = self.roles.lock().unwrap();
+                    let len = sugg.len().max(roles.len());
+                    roles.resize(len, None);
+                    for (r, s) in roles.iter_mut().zip(&sugg) {
+                        let decodable = matches!(
+                            s.role,
+                            Role::Uart { .. }
+                                | Role::I2cScl { .. }
+                                | Role::I2cSda { .. }
+                                | Role::SpiClk
+                                | Role::SpiMosi
+                                | Role::SpiMiso
+                                | Role::SpiCs
+                                | Role::SpiDc
+                                | Role::SpiData { .. }
+                        );
+                        if r.is_none() && decodable {
+                            // Auto-detected UARTs follow rate changes from any start.
+                            *r = Some(match s.role {
+                                Role::Uart { .. } => Role::Uart { baud: 0 },
+                                ref x => x.clone(),
+                            });
+                        }
+                    }
+                }
+                // SPI with a D/C line drives a display controller: if its first
+                // command bytes look like SSD1306 commands, decode them as such.
+                let has_dc = self.roles.lock().unwrap().contains(&Some(Role::SpiDc));
+                if has_dc && self.options.lock().unwrap().spi_protocol == SpiProtocol::Raw && self.looks_like_ssd1306() {
+                    self.options.lock().unwrap().spi_protocol = SpiProtocol::Ssd1306 { width: 128, height: 64 };
+                }
+                // A UART whose first byte is an ATR start in 8E framing is a
+                // smart card line.
+                let has_uart = self.roles.lock().unwrap().iter().any(|r| matches!(r, Some(Role::Uart { .. })));
+                if has_uart && self.options.lock().unwrap().uart_protocol == UartProtocol::Raw && self.looks_like_iso7816() {
+                    self.options.lock().unwrap().uart_protocol = UartProtocol::Iso7816;
+                }
+                self.apply_roles();
+                self.save_sidecar();
+                Some(self.status_json())
+            }
             "notes" => {
                 *self.notes.lock().unwrap() = msg.get("text").and_then(Json::str).unwrap_or("").to_string();
                 self.save_sidecar();
@@ -722,6 +838,7 @@ pub fn run(opts: WebOptions) -> io::Result<()> {
         bookmarks: Mutex::new(Vec::new()),
         notes: Mutex::new(String::new()),
         recording: Mutex::new((None, None, None)),
+        suggestions: Arc::new(Mutex::new(Vec::new())),
     });
     if let Some(p) = &opts.open
         && let Err(e) = session.open_path(p)
