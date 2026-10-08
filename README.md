@@ -92,7 +92,17 @@ visgrok --demo device -r 0=uart -r 1=spi-clk -r 2=spi-mosi -r 3=spi-dc -r 4=spi-
 ```
 
 Roles: `uart`, `uart:BAUD`, `spi-clk`, `spi-mosi`, `spi-miso`, `spi-cs`, `spi-dc`,
-`i2c-scl:SDA_CH`, `i2c-sda:SCL_CH`, `sd-clk`, `sd-cmd`, `sd-dat0`..`sd-dat3`, `idle`.
+`i2c-scl:SDA_CH`, `i2c-sda:SCL_CH`, `sd-clk`, `sd-cmd`, `sd-dat0`..`sd-dat3`,
+`iso-io`, `iso-clk`, `iso-rst`, `idle`.
+
+Smart cards (ISO 7816): with the card's clock and reset lines assigned, each
+reset release starts a numbered session (I/O is ignored while reset is held),
+characters are 8E2 at exactly 372 card clocks per bit, and a PPS switches to
+the selected Fi/Di:
+
+```sh
+visgrok -i card.vgk --headless -r 0=iso-clk -r 1=iso-rst -r 2=iso-io
+```
 
 SD cards (native SD bus): commands and responses by name with CRC7 checks
 (R1 status/state, CID, CSD capacity, OCR/SDHC, RCA), data blocks with per-line

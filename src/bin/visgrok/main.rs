@@ -75,7 +75,8 @@ pub struct Args {
     /// Assign a channel role, e.g. `--role 0=uart`, `--role 1=uart:115200`,
     /// `--role 2=spi-clk --role 3=spi-mosi --role 4=spi-dc --role 5=spi-cs`,
     /// `--role 6=i2c-scl:7 --role 7=i2c-sda:6`, `--role 8=sd-clk --role 9=sd-cmd
-    /// --role 10=sd-dat0 ... --role 13=sd-dat3`. Repeatable.
+    /// --role 10=sd-dat0 ... --role 13=sd-dat3`, `--role 0=iso-clk --role 1=iso-rst
+    /// --role 2=iso-io` (smart card). Repeatable.
     #[arg(short, long = "role", value_name = "CH=ROLE")]
     roles: Vec<String>,
     /// Name a channel, e.g. `--name 0=CLK`. Used in the UI and recorded files.

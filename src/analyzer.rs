@@ -298,10 +298,22 @@ impl Analyzer {
                         cfg.stop_bits = stop;
                         cfg.auto_format = false;
                     }
+                    let lines = (find(&Role::IsoClk), find(&Role::IsoRst));
                     match opts.uart_protocol {
                         UartProtocol::Raw => out.push(Box::new(Uart::new(cfg, self.samplerate))),
-                        UartProtocol::Iso7816 => out.push(Box::new(Iso7816::new(cfg, self.samplerate))),
+                        _ => out.push(Box::new(Iso7816::new(cfg, self.samplerate).with_lines(lines.0, lines.1))),
                     }
+                }
+                Role::IsoIo => {
+                    let mut cfg = UartConfig::auto(i as u8);
+                    if let Some((d, p, stop)) = opts.uart_format {
+                        cfg.data_bits = d;
+                        cfg.parity = p;
+                        cfg.stop_bits = stop;
+                        cfg.auto_format = false;
+                    }
+                    let d = Iso7816::new(cfg, self.samplerate).with_lines(find(&Role::IsoClk), find(&Role::IsoRst));
+                    out.push(Box::new(d));
                 }
                 Role::I2cScl { sda } => out.push(Box::new(I2c::new(i as u8, *sda))),
                 Role::SdClk => {

@@ -165,10 +165,22 @@ impl<'a> Request<'a> {
 }
 
 enum Bus {
-    Sd { clk: u8, cmd: u8, dat: Vec<u8> },
-    Uart { ch: u8, iso: bool },
+    Sd {
+        clk: u8,
+        cmd: u8,
+        dat: Vec<u8>,
+    },
+    Uart {
+        ch: u8,
+        iso: bool,
+        clk: Option<u8>,
+        rst: Option<u8>,
+    },
     Spi(SpiPins),
-    I2c { scl: u8, sda: u8 },
+    I2c {
+        scl: u8,
+        sda: u8,
+    },
 }
 
 struct SpiPins {
@@ -233,6 +245,8 @@ fn bus(source: &str) -> Option<Bus> {
         return Some(Bus::Uart {
             ch: digits.parse().ok()?,
             iso: source.starts_with("ISO7816"),
+            clk: pin(source, "clk"),
+            rst: pin(source, "rst"),
         });
     }
     None
@@ -247,7 +261,12 @@ pub fn lines(source: &str) -> Vec<(u8, &'static str)> {
             v.extend(dat.iter().zip(DAT).map(|(&c, n)| (c, n)));
             v
         }
-        Some(Bus::Uart { ch, iso }) => vec![(ch, if iso { "I/O" } else { "UART" })],
+        Some(Bus::Uart { ch, iso, clk, rst }) => {
+            let mut v = vec![(ch, if iso { "I/O" } else { "UART" })];
+            v.extend(clk.map(|c| (c, "CLK")));
+            v.extend(rst.map(|c| (c, "RST")));
+            v
+        }
         Some(Bus::Spi(p)) => [
             (p.cs, "CS"),
             (Some(p.clk), "CLK"),
@@ -281,7 +300,7 @@ pub fn inspect(req: &Request, sig: &Signal) -> Vec<Field> {
     let mut out = Out::default();
     match bus(req.source) {
         Some(Bus::Sd { clk, cmd, dat }) => sd_event(req, sig, clk, cmd, &dat, &mut out),
-        Some(Bus::Uart { ch, iso }) => uart_event(req, sig, ch, iso, &mut out),
+        Some(Bus::Uart { ch, iso, .. }) => uart_event(req, sig, ch, iso, &mut out),
         Some(Bus::Spi(p)) => spi_event(req, sig, &p, &mut out),
         Some(Bus::I2c { scl, sda }) => i2c_event(req, sig, scl, sda, &mut out),
         None => {}
@@ -1236,6 +1255,10 @@ mod tests {
             vec![(7, "CLK"), (1, "CMD"), (0, "DAT0"), (2, "DAT1"), (4, "DAT2"), (6, "DAT3")]
         );
         assert_eq!(lines("ISO7816 (UART ch3 auto)"), vec![(3, "I/O")]);
+        assert_eq!(
+            lines("ISO7816 clk=ch0 rst=ch1 (UART ch2)"),
+            vec![(2, "I/O"), (0, "CLK"), (1, "RST")]
+        );
         assert_eq!(lines("SSD1306 128x64 (SPI clk=ch1 mosi=ch2 cs=ch0 dc=ch3 mode 0)").len(), 4);
         assert_eq!(lines("I2C scl=ch4 sda=ch5"), vec![(4, "SCL"), (5, "SDA")]);
     }

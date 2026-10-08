@@ -261,6 +261,15 @@ impl Sidecar {
                     }
                     out.push(s);
                 }
+                Some(Role::IsoIo) => {
+                    let mut s = format!("ISO 7816 smart card: I/O {}", name(i));
+                    for (label, role) in [("CLK", Role::IsoClk), ("RST", Role::IsoRst)] {
+                        if let Some(c) = find(&role) {
+                            s += &format!(", {label} {}", name(c));
+                        }
+                    }
+                    out.push(s);
+                }
                 Some(Role::SdClk) => {
                     let mut s = format!("SD card: CLK {}", name(i));
                     if let Some(c) = find(&Role::SdCmd) {

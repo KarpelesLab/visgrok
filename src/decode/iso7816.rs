@@ -11,8 +11,16 @@
 //!   identified as T=1 blocks (NAD, PCB, LEN, information field, LRC) when
 //!   they have that structure.
 //!
-//! The underlying UART decoder follows the speed change after a PPS by
-//! itself; frames are reported with the UART events.
+//! Without more lines, the underlying UART decoder finds the rate by itself
+//! (and follows the change after a PPS). With the card's **clock** and
+//! **reset** lines assigned, decoding follows the card's state instead:
+//!
+//! - each release of reset starts a new numbered session (reported as an
+//!   event); the I/O line is ignored while reset is held, so power-up
+//!   glitches and the reset itself don't produce bytes;
+//! - characters are 8E2 at exactly 372 clock cycles per bit (the default
+//!   etu), measured from the clock, until a PPS selects other Fi/Di values
+//!   (reserved values leave the rate to automatic detection).
 
 use super::uart::{Uart, UartConfig};
 use super::{Annotation, Decoder, Event};
@@ -78,10 +86,52 @@ enum Phase {
     Session,
 }
 
+/// Measures the card clock from its rising edges: the average period over
+/// the current run of edges (restarted when the clock stops).
+#[derive(Default)]
+struct ClockMeter {
+    first: u64,
+    last: u64,
+    cycles: u64,
+}
+
+impl ClockMeter {
+    fn rising(&mut self, at: u64) {
+        // A pause of more than 100 typical periods: the clock was stopped.
+        let stopped = self.cycles > 0 && at - self.last > 100 * ((self.last - self.first) / self.cycles).max(1);
+        if self.cycles == 0 && self.last == 0 || stopped {
+            self.first = at;
+            self.cycles = 0;
+        } else {
+            self.cycles += 1;
+        }
+        self.last = at;
+    }
+
+    /// Samples per clock cycle, once 16 cycles were seen.
+    fn samples_per_cycle(&self) -> Option<f64> {
+        (self.cycles >= 16).then(|| (self.last - self.first) as f64 / self.cycles as f64)
+    }
+}
+
 /// Streaming ISO 7816-3 decoder.
 pub struct Iso7816 {
     uart: Uart,
+    /// Configuration the UART decoder is rebuilt from at each session.
+    cfg: UartConfig,
     samplerate: u64,
+    /// Card clock line, if assigned, and its measurement.
+    clk: Option<u8>,
+    clock: ClockMeter,
+    /// Card reset line, if assigned (active low).
+    rst: Option<u8>,
+    /// Reset is held: the I/O line is ignored.
+    in_reset: bool,
+    /// Sessions started (reset releases seen).
+    session: u32,
+    /// Clock cycles per bit to apply at the next character (set at reset
+    /// release and after a PPS; applied once the clock is measured).
+    pending_etu: Option<f64>,
     phase: Phase,
     /// Bytes of the frame being collected: (value, start, end).
     frame: Vec<(u8, u64, u64)>,
@@ -96,13 +146,103 @@ impl Iso7816 {
     /// Creates a decoder for the card I/O line described by `cfg`.
     pub fn new(cfg: UartConfig, samplerate: u64) -> Iso7816 {
         Iso7816 {
-            uart: Uart::new(cfg, samplerate),
+            uart: Uart::new(cfg.clone(), samplerate),
+            cfg,
             samplerate,
+            clk: None,
+            clock: ClockMeter::default(),
+            rst: None,
+            in_reset: false,
+            session: 0,
+            pending_etu: None,
             phase: Phase::Atr,
             frame: Vec::new(),
             pps_request: None,
             protocol: 0,
             scratch: Vec::new(),
+        }
+    }
+
+    /// Uses the card's clock line `clk` and reset line `rst` (either may be
+    /// `None`) to time characters and split the traffic into sessions. With
+    /// either line, characters are decoded as 8E2.
+    pub fn with_lines(mut self, clk: Option<u8>, rst: Option<u8>) -> Iso7816 {
+        self.clk = clk;
+        self.rst = rst;
+        if clk.is_some() || rst.is_some() {
+            self.cfg.data_bits = 8;
+            self.cfg.parity = super::uart::Parity::Even;
+            self.cfg.stop_bits = 2;
+            self.cfg.auto_format = false;
+            self.uart = Uart::new(self.cfg.clone(), self.samplerate);
+        }
+        if clk.is_some() {
+            self.pending_etu = Some(372.0);
+        }
+        self
+    }
+
+    fn note(out: &mut Vec<Annotation>, at: u64, text: String) {
+        out.push(Annotation {
+            start: at,
+            end: at,
+            event: Event::Protocol {
+                proto: PROTO,
+                text,
+                data: None,
+            },
+        });
+    }
+
+    /// Starts decoding characters afresh (new session or new rate). With
+    /// `etu` clock cycles per bit, the rate is fixed from the clock once it
+    /// is measured; without, the UART decoder detects it.
+    fn restart_uart(&mut self, etu: Option<f64>) {
+        let mut cfg = self.cfg.clone();
+        cfg.baud = None;
+        cfg.auto = true;
+        if etu.is_some() && self.clk.is_some() {
+            cfg.auto = false;
+        }
+        self.uart = Uart::new(cfg, self.samplerate);
+        self.pending_etu = if self.clk.is_some() { etu } else { None };
+    }
+
+    /// Applies a pending clock-derived rate, if the clock is measured.
+    fn apply_rate(&mut self, at: u64, out: &mut Vec<Annotation>) {
+        let (Some(etu), Some(spc)) = (self.pending_etu, self.clock.samples_per_cycle()) else {
+            return;
+        };
+        self.pending_etu = None;
+        self.uart.set_bit_time(etu * spc, at, out);
+    }
+
+    fn reset_line(&mut self, high: bool, at: u64, out: &mut Vec<Annotation>) {
+        if high == !self.in_reset {
+            return;
+        }
+        if high {
+            self.in_reset = false;
+            self.session += 1;
+            self.phase = Phase::Atr;
+            self.pps_request = None;
+            self.protocol = 0;
+            self.restart_uart(Some(372.0));
+            let clock = match self.clock.samples_per_cycle() {
+                Some(spc) => format!(", card clock {}", crate::roles::fmt_hz(self.samplerate as f64 / spc)),
+                None if self.clk.is_some() => ", card clock not running yet".into(),
+                None => String::new(),
+            };
+            Self::note(out, at, format!("── session {}: reset released{clock} ──", self.session));
+        } else {
+            let mut ev = std::mem::take(&mut self.scratch);
+            ev.clear();
+            self.uart.advance(at, &mut ev);
+            self.handle(&ev, at, out);
+            self.scratch = ev;
+            self.frame_done(out);
+            self.in_reset = true;
+            Self::note(out, at, format!("── session {}: reset asserted ──", self.session));
         }
     }
 
@@ -274,6 +414,22 @@ impl Iso7816 {
                         &bytes,
                     );
                     self.protocol = bytes[1] & 15;
+                    if self.clk.is_some() && req == bytes {
+                        // The new rate applies from the next character.
+                        let p0 = bytes[1];
+                        let etu = if p0 & 0x10 != 0 {
+                            let b = bytes[2];
+                            FI[(b >> 4) as usize].zip(DI[(b & 15) as usize]).map(|(f, d)| f as f64 / d as f64)
+                        } else {
+                            Some(372.0)
+                        };
+                        self.restart_uart(etu);
+                        let what = match etu {
+                            Some(e) => format!("{e} clock cycles per bit"),
+                            None => "reserved Fi/Di, rate detected from the traffic".into(),
+                        };
+                        Self::note(out, end, format!("── new rate: {what} ──"));
+                    }
                 }
             }
         } else if bytes.len() >= 4 && bytes[2] as usize + 4 == bytes.len() && bytes.iter().fold(0, |x, v| x ^ v) == 0 {
@@ -355,26 +511,64 @@ impl Iso7816 {
 
 impl Decoder for Iso7816 {
     fn name(&self) -> String {
-        format!("{PROTO} ({})", self.uart.name())
+        let mut lines = String::new();
+        if let Some(c) = self.clk {
+            lines += &format!(" clk=ch{c}");
+        }
+        if let Some(c) = self.rst {
+            lines += &format!(" rst=ch{c}");
+        }
+        if lines.is_empty() {
+            return format!("{PROTO} ({})", self.uart.name());
+        }
+        // The rate follows the card; keep the name stable.
+        format!("{PROTO}{lines} (UART ch{})", self.cfg.channel)
     }
 
     fn channels(&self) -> u32 {
-        self.uart.channels()
+        [self.clk, self.rst]
+            .into_iter()
+            .flatten()
+            .fold(self.uart.channels(), |m, c| m | 1 << c)
     }
 
     fn init(&mut self, state: u32) {
         self.uart.init(state);
+        if let Some(r) = self.rst {
+            self.in_reset = state >> r & 1 == 0;
+        }
     }
 
     fn transition(&mut self, t: &Transition, out: &mut Vec<Annotation>) {
+        let changed = t.changed();
+        if let Some(c) = self.clk
+            && changed >> c & 1 != 0
+            && t.now >> c & 1 != 0
+        {
+            self.clock.rising(t.at);
+        }
+        if let Some(r) = self.rst
+            && changed >> r & 1 != 0
+        {
+            self.reset_line(t.now >> r & 1 != 0, t.at, out);
+        }
+        if self.in_reset || changed & self.uart.channels() == 0 {
+            return;
+        }
         let mut ev = std::mem::take(&mut self.scratch);
         ev.clear();
+        if self.pending_etu.is_some() {
+            self.apply_rate(t.at, &mut ev);
+        }
         self.uart.transition(t, &mut ev);
         self.handle(&ev, t.at, out);
         self.scratch = ev;
     }
 
     fn advance(&mut self, to: u64, out: &mut Vec<Annotation>) {
+        if self.in_reset {
+            return;
+        }
         let mut ev = std::mem::take(&mut self.scratch);
         ev.clear();
         self.uart.advance(to, &mut ev);
@@ -386,6 +580,79 @@ impl Decoder for Iso7816 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A card bus: ch0 clock (10 samples per cycle), ch1 reset, ch2 I/O.
+    /// Reset is released at 100k samples; the card sends `atr` (8E2, 372
+    /// clocks per bit) 20k samples later. A glitch on I/O while reset is
+    /// held must not produce bytes.
+    #[test]
+    fn clock_and_reset() {
+        let atr = [0x3b, 0x02, 0x41, 0x42];
+        let bit = 3720u64;
+        // I/O levels over time: (sample, level).
+        let mut io = vec![(50_000u64, false), (50_040, true)];
+        let mut t = 120_000;
+        for &b in &atr {
+            let parity = (b as u32).count_ones() % 2 == 1;
+            let mut bits = vec![false];
+            bits.extend((0..8).map(|k| b >> k & 1 != 0));
+            bits.push(parity);
+            bits.extend([true, true]);
+            for (k, &v) in bits.iter().enumerate() {
+                io.push((t + k as u64 * bit, v));
+            }
+            t += 12 * bit;
+        }
+        let end = t + 20 * bit;
+        // Merge clock, reset and I/O into transitions.
+        let mut tr = Vec::new();
+        let mut state = 0b100u32; // I/O idle high, reset low, clock low
+        let mut io_i = 0;
+        for at in (5..end).step_by(5) {
+            let mut now = state ^ 1; // clock toggles every 5 samples
+            if at >= 100_000 {
+                now |= 0b010;
+            }
+            while io_i < io.len() && io[io_i].0 <= at {
+                now = if io[io_i].1 { now | 0b100 } else { now & !0b100 };
+                io_i += 1;
+            }
+            tr.push(Transition { at, prev: state, now });
+            state = now;
+        }
+        let mut d = Iso7816::new(UartConfig::auto(2), 100_000_000).with_lines(Some(0), Some(1));
+        d.init(0b100);
+        let mut out = Vec::new();
+        for t in &tr {
+            d.transition(t, &mut out);
+        }
+        d.advance(end + 100_000, &mut out);
+        let text: Vec<String> = out
+            .iter()
+            .filter_map(|a| match &a.event {
+                Event::Protocol { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            text[0].starts_with("── session 1: reset released, card clock 10.000 MHz"),
+            "{text:?}"
+        );
+        assert!(text.iter().any(|t| t.starts_with("ATR (direct convention)")), "{text:?}");
+        let bytes: Vec<u16> = out
+            .iter()
+            .filter_map(|a| match a.event {
+                Event::UartByte {
+                    value,
+                    framing_error: false,
+                    parity_error: false,
+                } => Some(value),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(bytes, [0x3b, 0x02, 0x41, 0x42], "{out:?}");
+        assert_eq!(d.name(), "ISO7816 clk=ch0 rst=ch1 (UART ch2)");
+    }
 
     fn texts(bytes: &[(u64, u8)], gap_samples: u64) -> Vec<String> {
         // Drive the frame logic directly with synthetic UART byte events.

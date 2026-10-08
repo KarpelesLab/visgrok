@@ -338,6 +338,12 @@ impl Uart {
         }
     }
 
+    /// Fixes the bit time to `bit` samples from sample `at` (reported as a
+    /// rate change).
+    pub(crate) fn set_bit_time(&mut self, bit: f64, at: u64, out: &mut Vec<Annotation>) {
+        self.set_bit(bit, at, out);
+    }
+
     fn set_bit(&mut self, bit: f64, at: u64, out: &mut Vec<Annotation>) {
         self.bit = Some(bit);
         if self.format_known {

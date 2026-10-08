@@ -61,6 +61,12 @@ pub enum Role {
     SdCmd,
     /// SD card data line DAT0..DAT3.
     SdDat(u8),
+    /// Smart card (ISO 7816) I/O line.
+    IsoIo,
+    /// Smart card clock.
+    IsoClk,
+    /// Smart card reset (active low).
+    IsoRst,
     /// Generic activity that matched nothing else.
     Data,
 }
@@ -84,6 +90,9 @@ impl fmt::Display for Role {
             Role::SdClk => write!(f, "SD CLK"),
             Role::SdCmd => write!(f, "SD CMD"),
             Role::SdDat(n) => write!(f, "SD DAT{n}"),
+            Role::IsoIo => write!(f, "card I/O"),
+            Role::IsoClk => write!(f, "card CLK"),
+            Role::IsoRst => write!(f, "card RST"),
             Role::Data => write!(f, "data"),
         }
     }
@@ -510,13 +519,17 @@ impl Role {
             Role::SdClk => "sd-clk".into(),
             Role::SdCmd => "sd-cmd".into(),
             Role::SdDat(n) => format!("sd-dat{n}"),
+            Role::IsoIo => "iso-io".into(),
+            Role::IsoClk => "iso-clk".into(),
+            Role::IsoRst => "iso-rst".into(),
             Role::Idle | Role::Clock { .. } | Role::Data => "idle".into(),
         }
     }
 
     /// Parses a role name as used on the command line: `uart`, `uart:115200`,
     /// `spi-clk`, `spi-mosi`, `spi-miso`, `spi-cs`, `spi-dc`, `i2c-scl:SDA`,
-    /// `i2c-sda:SCL`, `sd-clk`, `sd-cmd`, `sd-dat0`..`sd-dat3`, `idle`.
+    /// `i2c-sda:SCL`, `sd-clk`, `sd-cmd`, `sd-dat0`..`sd-dat3`, `iso-io`,
+    /// `iso-clk`, `iso-rst`, `idle`.
     pub fn parse(s: &str) -> Result<Role, String> {
         let (name, arg) = match s.split_once(':') {
             Some((n, a)) => (n, Some(a)),
@@ -544,6 +557,9 @@ impl Role {
             "sd-dat1" | "sd-d1" => Role::SdDat(1),
             "sd-dat2" | "sd-d2" => Role::SdDat(2),
             "sd-dat3" | "sd-d3" => Role::SdDat(3),
+            "iso-io" | "card-io" | "sim-io" => Role::IsoIo,
+            "iso-clk" | "card-clk" | "sim-clk" => Role::IsoClk,
+            "iso-rst" | "card-rst" | "sim-rst" => Role::IsoRst,
             "idle" | "none" => Role::Idle,
             _ => return Err(format!("unknown role {name:?}")),
         })

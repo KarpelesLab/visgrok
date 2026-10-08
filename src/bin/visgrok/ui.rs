@@ -75,6 +75,9 @@ const PICKS: &[&str] = &[
     "SD DAT1",
     "SD DAT2",
     "SD DAT3",
+    "smart card I/O (ISO 7816)",
+    "smart card CLK",
+    "smart card RST",
     "idle (ignore)",
 ];
 
@@ -104,7 +107,10 @@ fn pick_role(i: usize, ch: usize, roles: &[Option<Role>]) -> Option<Role> {
         9 => Some(Role::SdClk),
         10 => Some(Role::SdCmd),
         11..=14 => Some(Role::SdDat(i as u8 - 11)),
-        15 => Some(Role::Idle),
+        15 => Some(Role::IsoIo),
+        16 => Some(Role::IsoClk),
+        17 => Some(Role::IsoRst),
+        18 => Some(Role::Idle),
         _ => None,
     }
 }
