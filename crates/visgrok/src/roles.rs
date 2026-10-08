@@ -107,7 +107,7 @@ pub const BAUD_RATES: &[u32] = &[
 #[derive(Clone, Debug)]
 pub struct Correlator {
     n: usize,
-    state: u16,
+    state: u32,
     /// `hi[i][j]`: changes of j while i is high and steady.
     pub(crate) hi: Vec<u64>,
     /// `lo[i][j]`: changes of j while i is low and steady.
@@ -126,7 +126,7 @@ impl Correlator {
     }
 
     /// Sets the initial line state.
-    pub fn init(&mut self, state: u16) {
+    pub fn init(&mut self, state: u32) {
         self.state = state;
     }
 

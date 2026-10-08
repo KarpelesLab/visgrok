@@ -52,7 +52,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Checks every sample against the emulation pattern; returns (samples, mismatches).
 fn check(src: &mut dyn Source, channels: usize) -> std::io::Result<(u64, u64)> {
-    let mask: u32 = if channels >= 16 { 0xffff } else { (1 << channels) - 1 };
+    let mask = visgrok::block::channel_mask(channels);
     let mut expected: Option<u64> = None;
     let mut errors = 0u64;
     let mut samples = 0u64;
@@ -64,19 +64,19 @@ fn check(src: &mut dyn Source, channels: usize) -> std::io::Result<(u64, u64)> {
             let e = match expected {
                 Some(base) => {
                     let n = i + base;
-                    (((n & !7) | (7 - (n & 7))) as u32 & mask) as u16
+                    ((n & !7) | (7 - (n & 7))) as u32 & mask
                 }
                 None => {
                     let v = v as u64;
                     // Find n with pattern(n) == v (mod mask): n = (v & !7) | (7 - (v & 7)).
                     let n = (v & !7) | (7 - (v & 7));
                     expected = Some(n.wrapping_sub(i));
-                    v as u16
+                    v as u32
                 }
             };
             if v != e {
                 if errors < 10 {
-                    println!("mismatch at sample {i}: got {v:#06x} expected {e:#06x}");
+                    println!("mismatch at sample {i}: got {v:#010x} expected {e:#010x}");
                 }
                 errors += 1;
                 // Resynchronize after a gap.

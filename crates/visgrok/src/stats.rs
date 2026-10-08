@@ -175,7 +175,7 @@ impl Stats {
     }
 
     /// Sets the initial state of all channels (the first sample of the capture).
-    pub fn init(&mut self, state: u16) {
+    pub fn init(&mut self, state: u32) {
         for (i, c) in self.channels.iter_mut().enumerate() {
             c.level = state >> i & 1 != 0;
         }
@@ -219,7 +219,7 @@ mod tests {
         let mut s = Stats::new(1);
         s.init(0);
         let mut tr = Vec::new();
-        let mut lvl = 0u16;
+        let mut lvl = 0u32;
         for i in 1..=100u64 {
             let now = lvl ^ 1;
             tr.push(Transition { at: i * 10, prev: lvl, now });

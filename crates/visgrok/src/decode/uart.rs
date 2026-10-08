@@ -485,11 +485,11 @@ impl Decoder for Uart {
         }
     }
 
-    fn channels(&self) -> u16 {
+    fn channels(&self) -> u32 {
         1 << self.cfg.channel
     }
 
-    fn init(&mut self, _state: u16) {
+    fn init(&mut self, _state: u32) {
         self.edges.clear();
     }
 
@@ -537,7 +537,7 @@ mod tests {
         for (i, &l) in levels.iter().enumerate() {
             if l != cur {
                 let at = start + (i as f64 * bit) as u64;
-                out.push(Transition { at, prev: cur as u16, now: l as u16 });
+                out.push(Transition { at, prev: cur as u32, now: l as u32 });
                 cur = l;
             }
         }
@@ -587,7 +587,7 @@ mod tests {
         // supply ramp), then an 8E2 ATR at 21.5 kbaud.
         let sr = 200_000_000u64;
         let mut tr = Vec::new();
-        let mut level = 0u16;
+        let mut level = 0u32;
         let mut at = 1000u64;
         let mut x = 12345u32;
         for _ in 0..157 {
@@ -615,7 +615,7 @@ mod tests {
         let mut cur = true;
         for (i, &l) in levels.iter().enumerate() {
             if l != cur {
-                tr.push(Transition { at: start + (i as f64 * bit) as u64, prev: cur as u16, now: l as u16 });
+                tr.push(Transition { at: start + (i as f64 * bit) as u64, prev: cur as u32, now: l as u32 });
                 cur = l;
             }
         }
@@ -667,7 +667,7 @@ mod tests {
         let mut cur = true;
         for (i, &l) in levels.iter().enumerate() {
             if l != cur {
-                tr.push(Transition { at: (i as f64 * bit) as u64, prev: cur as u16, now: l as u16 });
+                tr.push(Transition { at: (i as f64 * bit) as u64, prev: cur as u32, now: l as u32 });
                 cur = l;
             }
         }

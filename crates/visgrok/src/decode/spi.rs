@@ -74,7 +74,7 @@ impl Spi {
         (self.cpol as u8) << 1 | self.cfg.mode.map_or(0, |m| m & 1)
     }
 
-    fn cs_active(&self, state: u16) -> bool {
+    fn cs_active(&self, state: u32) -> bool {
         match self.cfg.cs {
             Some(c) => (state >> c & 1 != 0) == self.cfg.cs_active_high,
             None => true,
@@ -88,8 +88,8 @@ impl Spi {
     }
 }
 
-fn bit(state: u16, ch: Option<u8>) -> u32 {
-    ch.map_or(0, |c| (state >> c & 1) as u32)
+fn bit(state: u32, ch: Option<u8>) -> u32 {
+    ch.map_or(0, |c| state >> c & 1)
 }
 
 impl Decoder for Spi {
@@ -110,14 +110,14 @@ impl Decoder for Spi {
         s + &format!(" mode {}", self.mode())
     }
 
-    fn channels(&self) -> u16 {
+    fn channels(&self) -> u32 {
         [Some(self.cfg.clk), self.cfg.mosi, self.cfg.miso, self.cfg.cs, self.cfg.dc]
             .into_iter()
             .flatten()
             .fold(0, |m, c| m | 1 << c)
     }
 
-    fn init(&mut self, state: u16) {
+    fn init(&mut self, state: u32) {
         self.clk = state >> self.cfg.clk & 1 != 0;
         self.selected = self.cs_active(state);
         if self.cfg.mode.is_none() && (self.cfg.cs.is_none() || !self.selected) {
@@ -200,18 +200,18 @@ pub(crate) mod tests {
 
     /// Signal builder: ch0 clk, ch1 mosi, ch2 cs (active low), ch3 dc.
     pub(crate) struct Bus {
-        pub st: u16,
+        pub st: u32,
         pub at: u64,
         pub tr: Vec<Transition>,
-        pub idle_clk: u16,
+        pub idle_clk: u32,
     }
 
     impl Bus {
         pub(crate) fn new(cpol: bool) -> Bus {
-            let idle_clk = cpol as u16;
+            let idle_clk = cpol as u32;
             Bus { st: 0b100 | idle_clk, at: 0, tr: Vec::new(), idle_clk }
         }
-        pub(crate) fn set(&mut self, v: u16) {
+        pub(crate) fn set(&mut self, v: u32) {
             self.at += 10;
             if v != self.st {
                 self.tr.push(Transition { at: self.at, prev: self.st, now: v });
@@ -220,13 +220,13 @@ pub(crate) mod tests {
         }
         /// Sends bytes in mode 0/2 (sample on the leading edge).
         pub(crate) fn send(&mut self, bytes: &[u8], dc: bool, cs: bool) {
-            let base = (dc as u16) << 3 | self.idle_clk;
+            let base = (dc as u32) << 3 | self.idle_clk;
             if cs {
                 self.set(base);
             }
             for &b in bytes {
                 for k in (0..8).rev() {
-                    let d = ((b >> k & 1) as u16) << 1;
+                    let d = ((b >> k & 1) as u32) << 1;
                     self.set(base | d);
                     self.set((base | d) ^ 1);
                     self.set(base | d);
@@ -239,7 +239,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn run(d: &mut Spi, bus: &Bus, init: u16) -> Vec<Event> {
+    fn run(d: &mut Spi, bus: &Bus, init: u32) -> Vec<Event> {
         d.init(init);
         let mut out = Vec::new();
         for t in &bus.tr {

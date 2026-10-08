@@ -270,11 +270,11 @@ impl Decoder for Ssd1306 {
         format!("{PROTO} {}x{} ({})", self.width, self.height, self.spi.name())
     }
 
-    fn channels(&self) -> u16 {
+    fn channels(&self) -> u32 {
         self.spi.channels()
     }
 
-    fn init(&mut self, state: u16) {
+    fn init(&mut self, state: u32) {
         self.spi.init(state);
     }
 

@@ -8,7 +8,7 @@ use visgrok::roles::Role;
 
 fn main() {
     let sr: u64 = std::env::args().nth(1).map_or(100_000_000, |s| s.parse().unwrap());
-    let ignore: u16 = std::env::args().nth(2).map_or(0, |s| s.parse().unwrap());
+    let ignore: u32 = std::env::args().nth(2).map_or(0, |s| s.parse().unwrap());
     let n = sr as usize; // one second
     let per = sr as f64 / 16_000_000.0; // half period of 8 MHz
     let data: Vec<u8> = (0..n).map(|i| ((i as f64 / per) as u64 & 1) as u8).collect();

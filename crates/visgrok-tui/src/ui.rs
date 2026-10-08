@@ -35,6 +35,27 @@ struct Ui {
     message: Option<(String, Instant)>,
     /// Role picker for the selected channel, when open.
     picker: Option<ListState>,
+    /// Show every channel even when there are many.
+    show_all: bool,
+}
+
+/// Channels shown in the table and waveform. Up to 16 channels: all of
+/// them. Beyond that (SLogic32): those with activity, a role or a custom
+/// name, unless the user asked for all.
+fn visible(pipe: &Pipeline, ui: &Ui, snap: &Snapshot) -> Vec<usize> {
+    let n = pipe.info.channels;
+    if n <= 16 || ui.show_all {
+        return (0..n).collect();
+    }
+    let roles = pipe.roles.lock().unwrap();
+    let v: Vec<usize> = (0..n)
+        .filter(|&i| {
+            snap.channels.get(i).is_some_and(|c| c.edges > 0)
+                || roles.get(i).is_some_and(|r| r.is_some())
+                || pipe.names[i] != format!("D{i}")
+        })
+        .collect();
+    if v.is_empty() { (0..8.min(n)).collect() } else { v }
 }
 
 /// Roles offered by the picker.
@@ -88,7 +109,7 @@ fn fix_i2c_pairs(roles: &mut [Option<Role>]) {
 #[derive(Clone)]
 struct Snapshot {
     samples: u64,
-    state: Option<u16>,
+    state: Option<u32>,
     channels: Vec<ChannelRow>,
     suggestions: Vec<Suggestion>,
     wave: Vec<visgrok::Transition>,
@@ -157,6 +178,7 @@ fn event_loop(term: &mut DefaultTerminal, pipe: &Pipeline, auto: bool) -> io::Re
         auto_applied: false,
         message: None,
         picker: None,
+        show_all: false,
     };
     loop {
         if ui.auto && !ui.auto_applied && pipe.seconds() >= 2.0 {
@@ -185,7 +207,9 @@ fn event_loop(term: &mut DefaultTerminal, pipe: &Pipeline, auto: bool) -> io::Re
         if k.kind != KeyEventKind::Press {
             continue;
         }
-        let sel = ui.table.selected().unwrap_or(0);
+        let vis = visible(pipe, &ui, &snap);
+        let row = ui.table.selected().unwrap_or(0).min(vis.len().saturating_sub(1));
+        let sel = vis.get(row).copied().unwrap_or(0);
         if let Some(p) = &mut ui.picker {
             let i = p.selected().unwrap_or(0);
             match k.code {
@@ -240,8 +264,12 @@ fn event_loop(term: &mut DefaultTerminal, pipe: &Pipeline, auto: bool) -> io::Re
             }
             KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
             KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => return Ok(()),
-            KeyCode::Down | KeyCode::Char('j') => ui.table.select(Some((sel + 1).min(n - 1))),
-            KeyCode::Up | KeyCode::Char('k') => ui.table.select(Some(sel.saturating_sub(1))),
+            KeyCode::Down | KeyCode::Char('j') => ui.table.select(Some((row + 1).min(vis.len().saturating_sub(1)))),
+            KeyCode::Up | KeyCode::Char('k') => ui.table.select(Some(row.saturating_sub(1))),
+            KeyCode::Char('v') => {
+                ui.show_all = !ui.show_all;
+                ui.flash(if ui.show_all { "showing all channels" } else { "showing active/assigned channels" });
+            }
             KeyCode::Char('+') | KeyCode::Char('=') => ui.zoom = (ui.zoom / 2).max(16),
             KeyCode::Char('-') => ui.zoom = (ui.zoom * 2).min(pipe.info.samplerate * 10),
             KeyCode::Char(' ') => {
@@ -309,7 +337,8 @@ impl Ui {
 }
 
 fn draw(f: &mut Frame, pipe: &Pipeline, ui: &mut Ui, snap: &Snapshot) {
-    let n = pipe.info.channels as u16;
+    let vis = visible(pipe, ui, snap);
+    let n = vis.len() as u16;
     let disp_rows = snap.display.as_ref().map_or(0, |d| d.height.div_ceil(4) as u16 + 2);
     let [header, middle, wave, bottom, help] = Layout::vertical([
         Constraint::Length(3),
@@ -330,8 +359,8 @@ fn draw(f: &mut Frame, pipe: &Pipeline, ui: &mut Ui, snap: &Snapshot) {
     };
 
     draw_header(f, header, pipe, ui, snap);
-    draw_channels(f, middle, pipe, ui, snap);
-    draw_wave(f, wave, pipe, ui, snap);
+    draw_channels(f, middle, pipe, ui, snap, &vis);
+    draw_wave(f, wave, pipe, ui, snap, &vis);
 
     let lines: Vec<Line> = snap
         .log
@@ -345,7 +374,7 @@ fn draw(f: &mut Frame, pipe: &Pipeline, ui: &mut Ui, snap: &Snapshot) {
     f.render_widget(Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(title)), log);
 
     let mut help_spans = vec![Span::styled(
-        " q quit  ↑↓ select  ⏎ set role  a auto-assign all  A accept  u UART  i I2C  x clear  p SPI proto  m SPI mode  +/- zoom  space pause  r reset",
+        " q quit  ↑↓ select  ⏎ set role  a auto-assign all  A accept  u UART  i I2C  x clear  p SPI proto  m SPI mode  v all ch  +/- zoom  space pause  r reset",
         Style::default().fg(Color::DarkGray),
     )];
     if let Some((m, at)) = &ui.message
@@ -356,7 +385,7 @@ fn draw(f: &mut Frame, pipe: &Pipeline, ui: &mut Ui, snap: &Snapshot) {
     f.render_widget(Paragraph::new(Line::from(help_spans)), help);
 
     if let Some(p) = &mut ui.picker {
-        let sel = ui.table.selected().unwrap_or(0);
+        let sel = vis.get(ui.table.selected().unwrap_or(0)).copied().unwrap_or(0);
         let area = f.area();
         let w = 46.min(area.width);
         let h = (PICKS.len() as u16 + 2).min(area.height);
@@ -434,11 +463,12 @@ fn draw_header(f: &mut Frame, area: Rect, pipe: &Pipeline, ui: &Ui, snap: &Snaps
     f.render_widget(Paragraph::new(Line::from(status)).block(Block::default().borders(Borders::ALL)), area);
 }
 
-fn draw_channels(f: &mut Frame, area: Rect, pipe: &Pipeline, ui: &mut Ui, snap: &Snapshot) {
+fn draw_channels(f: &mut Frame, area: Rect, pipe: &Pipeline, ui: &mut Ui, snap: &Snapshot, vis: &[usize]) {
     let sr = pipe.info.samplerate as f64;
     let roles = pipe.roles.lock().unwrap().clone();
     let name_w = pipe.names.iter().map(|n| n.chars().count()).max().unwrap_or(2).max(2) as u16 + 1;
-    let rows = snap.channels.iter().enumerate().map(|(i, c)| {
+    let rows = vis.iter().map(|&i| {
+        let c = &snap.channels[i];
         let level = snap.state.map(|s| s >> i & 1 != 0);
         let lvl = match level {
             Some(true) => Span::styled("HIGH", Style::default().fg(Color::Green)),
@@ -487,11 +517,15 @@ fn draw_channels(f: &mut Frame, area: Rect, pipe: &Pipeline, ui: &mut Ui, snap: 
             .style(Style::default().add_modifier(Modifier::BOLD)),
     )
     .row_highlight_style(Style::default().bg(Color::DarkGray))
-    .block(Block::default().borders(Borders::ALL).title(" Channels "));
+    .block(Block::default().borders(Borders::ALL).title(if vis.len() < pipe.info.channels {
+        format!(" Channels ({} of {} shown, v: all) ", vis.len(), pipe.info.channels)
+    } else {
+        " Channels ".to_string()
+    }));
     f.render_stateful_widget(table, area, &mut ui.table);
 }
 
-fn draw_wave(f: &mut Frame, area: Rect, pipe: &Pipeline, ui: &Ui, snap: &Snapshot) {
+fn draw_wave(f: &mut Frame, area: Rect, pipe: &Pipeline, ui: &Ui, snap: &Snapshot, vis: &[usize]) {
     let sr = pipe.info.samplerate as f64;
     let title = format!(" Waveform: last {} ", fmt_time(ui.zoom as f64 / sr));
     let block = Block::default().borders(Borders::ALL).title(title);
@@ -506,8 +540,8 @@ fn draw_wave(f: &mut Frame, area: Rect, pipe: &Pipeline, ui: &Ui, snap: &Snapsho
     let start = end.saturating_sub(ui.zoom);
     let span = (end - start).max(1);
     let mut lines = Vec::new();
-    for ch in 0..pipe.info.channels {
-        let bit = 1u16 << ch;
+    for &ch in vis {
+        let bit = 1u32 << ch;
         // Level at window start.
         let mut idx = snap.wave.partition_point(|t| t.at <= start);
         let mut level = if idx > 0 {
@@ -596,6 +630,7 @@ mod tests {
             auto_applied: false,
             message: None,
             picker: None,
+            show_all: false,
         };
         let snap = snapshot(&pipe.analyzer.lock().unwrap(), ui.zoom);
         let mut term = Terminal::new(TestBackend::new(150, 40)).unwrap();
@@ -610,6 +645,76 @@ mod tests {
         }
         println!("{out}");
         assert!(out.contains("UART 115200"));
+    }
+
+    /// The device demo moved to channels 24..28 of a 32-channel stream.
+    struct High(Synth);
+
+    impl visgrok::Source for High {
+        fn info(&self) -> visgrok::CaptureInfo {
+            let mut i = self.0.info();
+            i.channels = 32;
+            i.unit_size = 4;
+            i
+        }
+        fn next_block(&mut self) -> std::io::Result<Option<visgrok::Block>> {
+            Ok(self.0.next_block()?.map(|b| {
+                let data = b.data.iter().flat_map(|&v| ((v as u32) << 24).to_le_bytes()).collect();
+                visgrok::Block::new(b.start, 4, data)
+            }))
+        }
+    }
+
+    #[test]
+    fn renders_32_channels() {
+        use visgrok::analyzer::{DecoderOptions, SpiProtocol};
+        let mut roles = vec![None; 32];
+        roles[24] = Some(Role::Uart { baud: 0 });
+        roles[25] = Some(Role::SpiClk);
+        roles[26] = Some(Role::SpiMosi);
+        roles[27] = Some(Role::SpiDc);
+        roles[28] = Some(Role::SpiCs);
+        let opts = DecoderOptions { spi_protocol: SpiProtocol::Ssd1306 { width: 128, height: 64 }, ..Default::default() };
+        let pipe = Pipeline::start(
+            Box::new(High(Synth::device(50_000_000, Some(15_000_000)))),
+            None,
+            Setup { roles, options: opts, ..Default::default() },
+        )
+        .unwrap();
+        while !pipe.finished() {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        pipe.join();
+        let mut ui = Ui {
+            table: TableState::default().with_selected(Some(0)),
+            zoom: 50_000,
+            paused: false,
+            frozen: None,
+            last_edges: vec![0; 32],
+            edge_rate: vec![0.0; 32],
+            last_rate_at: Instant::now(),
+            auto: false,
+            auto_applied: false,
+            message: None,
+            picker: None,
+            show_all: false,
+        };
+        let snap = snapshot(&pipe.analyzer.lock().unwrap(), ui.zoom);
+        let mut term = Terminal::new(TestBackend::new(160, 48)).unwrap();
+        term.draw(|f| draw(f, &pipe, &mut ui, &snap)).unwrap();
+        let buf = term.backend().buffer();
+        let mut out = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        println!("{out}");
+        assert!(out.contains("5 of 32 shown"), "{out}");
+        assert!(out.contains("D28"));
+        assert!(out.contains("SSD1306 128×64 on"));
+        assert!(out.contains("baud rate"));
     }
 
     #[test]
@@ -639,6 +744,7 @@ mod tests {
             auto_applied: false,
             message: None,
             picker: None,
+            show_all: false,
         };
         let snap = snapshot(&pipe.analyzer.lock().unwrap(), ui.zoom);
         let mut term = Terminal::new(TestBackend::new(160, 48)).unwrap();

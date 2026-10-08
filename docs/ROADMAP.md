@@ -50,7 +50,13 @@ Status legend: ✅ done · 🚧 in progress · ⬜ planned
 - ⬜ Investigate the residual 400 MB/s losses (Linux comparison; rawusb macOS
   submission path; larger/fewer transfers).
 - ⬜ Combo 8 support is implemented from source but untested (no hardware).
-- ⬜ SLogic32 U3: 32-channel mode.
+- 🚧 SLogic32 U3 (`359f:3032`): implemented from the protocol spec, not yet
+  tested on hardware. 32-bit samples throughout (4-byte units in blocks, `.vgk`
+  and `.sr`), 1400/800 MHz base clocks (4ch→1.4 GHz, 8ch→800, 16ch→400,
+  32ch→200 MHz, up to 800 MB/s), TUI shows only active/assigned channels when
+  there are more than 16 (`v` toggles all). To verify: the divider width, and
+  Sipeed's notes that reduced modes may carry the high channel bytes or read
+  zeros on real pins.
 - ⬜ Hardware tests with real signals in 4/8-channel modes; unplug during capture.
 
 ## Phase 3: TUI and pipeline

@@ -6,7 +6,7 @@ use visgrok::vgk::VgkReader;
 fn main() -> std::io::Result<()> {
     let a: Vec<String> = std::env::args().collect();
     let mut r = VgkReader::open(&a[1])?;
-    let mask: u16 = a[2].parse().unwrap();
+    let mask: u32 = a[2].parse().unwrap();
     let from: f64 = a.get(3).map_or(0.0, |s| s.parse().unwrap());
     let to: f64 = a.get(4).map_or(f64::MAX, |s| s.parse().unwrap());
     let max: usize = a.get(5).map_or(200, |s| s.parse().unwrap());

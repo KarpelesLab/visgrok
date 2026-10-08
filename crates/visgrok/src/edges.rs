@@ -1,10 +1,10 @@
 //! Transition extraction: turns sample blocks into a sparse list of changes.
 //!
 //! Almost all real-time analysis works on transitions rather than raw samples:
-//! a 16-channel stream at hundreds of MS/s is mostly runs of identical values,
-//! and the interesting information is where (and which) bits change.
+//! a multi-channel stream at hundreds of MS/s is mostly runs of identical
+//! values, and the interesting information is where (and which) bits change.
 
-use crate::block::Block;
+use crate::block::{Block, Sample};
 
 /// A change of state on one or more channels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -12,24 +12,24 @@ pub struct Transition {
     /// Sample index at which the new state first appears.
     pub at: u64,
     /// State before the change.
-    pub prev: u16,
+    pub prev: Sample,
     /// State from `at` onwards.
-    pub now: u16,
+    pub now: Sample,
 }
 
 impl Transition {
     /// Bitmask of channels that changed.
-    pub fn changed(&self) -> u16 {
+    pub fn changed(&self) -> Sample {
         self.prev ^ self.now
     }
 
     /// Bitmask of channels with a rising edge.
-    pub fn rising(&self) -> u16 {
+    pub fn rising(&self) -> Sample {
         !self.prev & self.now
     }
 
     /// Bitmask of channels with a falling edge.
-    pub fn falling(&self) -> u16 {
+    pub fn falling(&self) -> Sample {
         self.prev & !self.now
     }
 }
@@ -37,19 +37,19 @@ impl Transition {
 /// Stateful transition detector spanning block boundaries.
 #[derive(Clone, Debug, Default)]
 pub struct EdgeDetector {
-    last: Option<u16>,
+    last: Option<Sample>,
     /// Channels to watch; changes on other channels are ignored.
-    mask: u16,
+    mask: Sample,
 }
 
 impl EdgeDetector {
     /// Creates a detector watching the channels in `mask`.
-    pub fn new(mask: u16) -> EdgeDetector {
+    pub fn new(mask: Sample) -> EdgeDetector {
         EdgeDetector { last: None, mask }
     }
 
     /// Current state (after the last processed sample), if any sample was seen.
-    pub fn state(&self) -> Option<u16> {
+    pub fn state(&self) -> Option<Sample> {
         self.last
     }
 
@@ -62,76 +62,44 @@ impl EdgeDetector {
             return;
         }
         let mask = self.mask;
-        let mut prev = match self.last {
-            Some(v) => v,
-            None => block.sample(0) & mask,
+        let mut prev = self.last.unwrap_or(block.sample(0) & mask);
+        let unit = block.unit_size;
+        let per_word = 8 / unit;
+        // `prev` and `mask` repeated across a 64-bit word, for skipping runs
+        // of unchanged samples eight bytes at a time.
+        let splat = |v: Sample| -> u64 {
+            let b = (v as u64).to_le_bytes();
+            let mut w = [0u8; 8];
+            for (i, x) in w.iter_mut().enumerate() {
+                *x = b[i % unit];
+            }
+            u64::from_ne_bytes(w)
         };
-        match block.unit_size {
-            1 => scan(&block.data, block.start, prev as u8, mask as u8, |at, p, n| {
-                out.push(Transition { at, prev: p as u16, now: n as u16 })
-            }, &mut prev),
-            _ => scan16(block, mask, &mut prev, out),
+        let wmask = splat(mask);
+        let mut wprev = splat(prev);
+        let data = &block.data;
+        let n = block.len();
+        let mut i = 0;
+        while i < n {
+            while i + per_word <= n {
+                let w = u64::from_ne_bytes(data[i * unit..i * unit + 8].try_into().unwrap());
+                if (w ^ wprev) & wmask != 0 {
+                    break;
+                }
+                i += per_word;
+            }
+            let end = (i + per_word).min(n);
+            while i < end {
+                let v = block.sample(i) & mask;
+                if v != prev {
+                    out.push(Transition { at: block.start + i as u64, prev, now: v });
+                    prev = v;
+                    wprev = splat(prev);
+                }
+                i += 1;
+            }
         }
         self.last = Some(prev);
-    }
-}
-
-fn scan(data: &[u8], start: u64, mut prev: u8, mask: u8, mut emit: impl FnMut(u64, u8, u8), last: &mut u16) {
-    let mut i = 0;
-    while i < data.len() {
-        // Skip quickly over runs equal to `prev` eight bytes at a time.
-        let splat = u64::from_ne_bytes([prev; 8]);
-        let mmask = u64::from_ne_bytes([mask; 8]);
-        while i + 8 <= data.len() {
-            let w = u64::from_ne_bytes(data[i..i + 8].try_into().unwrap());
-            if (w ^ splat) & mmask != 0 {
-                break;
-            }
-            i += 8;
-        }
-        let end = (i + 8).min(data.len());
-        while i < end {
-            let v = data[i] & mask;
-            if v != prev {
-                emit(start + i as u64, prev, v);
-                prev = v;
-            }
-            i += 1;
-        }
-    }
-    *last = prev as u16;
-}
-
-fn scan16(block: &Block, mask: u16, prev: &mut u16, out: &mut Vec<Transition>) {
-    let data = &block.data;
-    let n = block.len();
-    let mut i = 0;
-    while i < n {
-        let p = *prev;
-        let splat = u64::from_ne_bytes({
-            let b = p.to_le_bytes();
-            [b[0], b[1], b[0], b[1], b[0], b[1], b[0], b[1]]
-        });
-        let mmask = u64::from_ne_bytes({
-            let b = mask.to_le_bytes();
-            [b[0], b[1], b[0], b[1], b[0], b[1], b[0], b[1]]
-        });
-        while i + 4 <= n {
-            let w = u64::from_ne_bytes(data[2 * i..2 * i + 8].try_into().unwrap());
-            if (w ^ splat) & mmask != 0 {
-                break;
-            }
-            i += 4;
-        }
-        let end = (i + 4).min(n);
-        while i < end {
-            let v = block.sample(i) & mask;
-            if v != *prev {
-                out.push(Transition { at: block.start + i as u64, prev: *prev, now: v });
-                *prev = v;
-            }
-            i += 1;
-        }
     }
 }
 
@@ -169,6 +137,26 @@ mod tests {
         assert_eq!(out.len(), 2);
         assert_eq!(out[0], Transition { at: 113, prev: 0x8000, now: 0x8001 });
         assert_eq!(out[1].at, 114);
+    }
+
+    #[test]
+    fn detects_32bit() {
+        let mut d = EdgeDetector::new(u32::MAX);
+        let mut out = Vec::new();
+        let mut s = [0x8000_0000u32; 23];
+        s[9] = 0x8001_0000;
+        s[10] = 0x8001_0000;
+        s[22] = 0;
+        let data: Vec<u8> = s.iter().flat_map(|v| v.to_le_bytes()).collect();
+        d.process(&Block::new(0, 4, data), &mut out);
+        assert_eq!(
+            out,
+            vec![
+                Transition { at: 9, prev: 0x8000_0000, now: 0x8001_0000 },
+                Transition { at: 11, prev: 0x8001_0000, now: 0x8000_0000 },
+                Transition { at: 22, prev: 0x8000_0000, now: 0 },
+            ]
+        );
     }
 
     #[test]

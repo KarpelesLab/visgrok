@@ -87,9 +87,9 @@ pub trait Decoder: Send {
     /// Short description, e.g. `"UART ch3 115200"`.
     fn name(&self) -> String;
     /// Bitmask of channels this decoder looks at.
-    fn channels(&self) -> u16;
+    fn channels(&self) -> u32;
     /// Sets the line state at the start of capture.
-    fn init(&mut self, state: u16);
+    fn init(&mut self, state: u32);
     /// Feeds one transition (only called when one of [`Decoder::channels`] changed).
     fn transition(&mut self, t: &Transition, out: &mut Vec<Annotation>);
     /// Signals that no transition happens before sample `to`; lets decoders

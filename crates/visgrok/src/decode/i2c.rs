@@ -40,11 +40,11 @@ impl Decoder for I2c {
         format!("I2C scl=ch{} sda=ch{}", self.scl, self.sda)
     }
 
-    fn channels(&self) -> u16 {
+    fn channels(&self) -> u32 {
         1 << self.scl | 1 << self.sda
     }
 
-    fn init(&mut self, state: u16) {
+    fn init(&mut self, state: u32) {
         self.scl_level = state >> self.scl & 1 != 0;
         self.sda_level = state >> self.sda & 1 != 0;
     }
@@ -99,10 +99,10 @@ mod tests {
 
     /// Generates transitions for a write of `bytes` to 7-bit `addr`, ch0=SCL ch1=SDA.
     fn write(addr: u8, bytes: &[u8]) -> Vec<Transition> {
-        let mut st = 0b11u16;
+        let mut st = 0b11u32;
         let mut at = 0u64;
         let mut out = Vec::new();
-        let mut set = |st: &mut u16, at: &mut u64, v: u16| {
+        let mut set = |st: &mut u32, at: &mut u64, v: u32| {
             *at += 10;
             if v != *st {
                 out.push(Transition { at: *at, prev: *st, now: v });
@@ -116,7 +116,7 @@ mod tests {
         for (b, ack) in frame {
             let bits: Vec<bool> = (0..8).rev().map(|k| b >> k & 1 != 0).chain([!ack]).collect();
             for bit in bits {
-                let sda = (bit as u16) << 1;
+                let sda = (bit as u32) << 1;
                 set(&mut st, &mut at, sda);
                 set(&mut st, &mut at, sda | 1);
                 set(&mut st, &mut at, sda);

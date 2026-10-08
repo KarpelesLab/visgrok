@@ -109,8 +109,8 @@ pub struct Capture {
     shared: Arc<Shared>,
     xfer_size: usize,
     drop_left: usize,
-    /// Odd byte left over from the previous transfer (16-channel mode).
-    carry: Option<u8>,
+    /// Partial sample left over from the previous transfer (16/32 channels).
+    carry: Vec<u8>,
     /// Samples emitted so far.
     pos: u64,
     verify: Option<Verify>,
@@ -158,7 +158,7 @@ impl Capture {
             shared,
             xfer_size,
             drop_left: HEAD_ARTIFACT,
-            carry: None,
+            carry: Vec::new(),
             pos: 0,
             verify: None,
             ready: VecDeque::new(),
@@ -186,7 +186,7 @@ impl Capture {
         self.drain_endpoint();
         self.dev.configure(&self.cfg)?;
         self.drop_left = HEAD_ARTIFACT;
-        self.carry = None;
+        self.carry.clear();
         self.shared.stopping.store(false, Ordering::SeqCst);
         for t in &self.transfers {
             t.set_buffer(self.shared.buffer(self.xfer_size))?;
@@ -263,14 +263,15 @@ impl Capture {
                 }
                 (1, out)
             }
-            16 => {
-                let mut out = Vec::with_capacity(data.len() + 1);
-                out.extend(self.carry.take());
+            16 | 32 => {
+                // Keep a partial sample for the next transfer.
+                let unit = self.cfg.channels / 8;
+                let mut out = Vec::with_capacity(data.len() + self.carry.len());
+                out.append(&mut self.carry);
                 out.extend_from_slice(data);
-                if out.len() % 2 == 1 {
-                    self.carry = out.pop();
-                }
-                (2, out)
+                let whole = out.len() / unit * unit;
+                self.carry = out.split_off(whole);
+                (unit, out)
             }
             _ => (1, data.to_vec()),
         };
@@ -394,7 +395,7 @@ impl Source for Capture {
             device,
             channels: self.cfg.channels,
             samplerate: self.cfg.samplerate,
-            unit_size: if self.cfg.channels > 8 { 2 } else { 1 },
+            unit_size: crate::block::unit_size_for(self.cfg.channels),
         }
     }
 

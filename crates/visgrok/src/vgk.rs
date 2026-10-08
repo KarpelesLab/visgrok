@@ -128,7 +128,7 @@ impl Meta {
                 _ => m.extra.push((k.to_string(), v.to_string())),
             }
         }
-        if m.unit_size != 1 && m.unit_size != 2 || m.channels == 0 || m.samplerate == 0 {
+        if !matches!(m.unit_size, 1 | 2 | 4) || m.channels == 0 || m.samplerate == 0 {
             return Err(invalid("incomplete metadata".into()));
         }
         Ok(m)

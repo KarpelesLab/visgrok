@@ -47,7 +47,7 @@ mod aux {
 pub enum Model {
     /// SLogic16 U3: 16 channels, USB 3, up to 800 MHz (4 ch).
     SLogic16U3,
-    /// SLogic32 U3: 32 channels (only 16 used by visgrok), USB 3.
+    /// SLogic32 U3: 32 channels, USB 3.2 Gen2, up to 1.4 GHz (4 ch).
     SLogic32U3,
     /// SLogic Combo 8: 8 channels, USB 2, up to 160 MHz (2 ch). Untested.
     Combo8,
@@ -85,7 +85,8 @@ impl Model {
     pub fn channel_modes(self) -> &'static [usize] {
         match self {
             Model::Combo8 => &[4, 8],
-            _ => &[4, 8, 16],
+            Model::SLogic16U3 => &[4, 8, 16],
+            Model::SLogic32U3 => &[4, 8, 16, 32],
         }
     }
 
@@ -107,11 +108,19 @@ impl Model {
     /// per-channel-count bandwidth limit.
     pub fn samplerates(self) -> Vec<u64> {
         match self {
-            // 800 MHz / (divm1 + 1), divm1 0..=255; keep integer-Hz rates.
-            Model::SLogic16U3 | Model::SLogic32U3 => (1..=256u64)
-                .filter(|n| 800_000_000 % n == 0)
-                .map(|n| 800_000_000 / n)
-                .collect(),
+            // base / (divm1 + 1), divm1 0..=255; keep integer-Hz rates. The
+            // 16U3 has one 800 MHz base; the 32U3 has 1400 and 800 MHz.
+            Model::SLogic16U3 | Model::SLogic32U3 => {
+                let bases: &[u64] =
+                    if self == Model::SLogic32U3 { &[1_400_000_000, 800_000_000] } else { &[800_000_000] };
+                let mut v: Vec<u64> = bases
+                    .iter()
+                    .flat_map(|&b| (1..=256u64).filter(move |n| b % n == 0).map(move |n| b / n))
+                    .collect();
+                v.sort_unstable_by(|a, b| b.cmp(a));
+                v.dedup();
+                v
+            }
             Model::Combo8 => [160, 80, 40, 32, 20, 16, 10, 8, 5, 4, 2, 1].iter().map(|m| m * 1_000_000).collect(),
         }
     }
@@ -570,6 +579,14 @@ mod tests {
         assert_eq!(Model::SLogic16U3.max_samplerate(16), 200_000_000);
         assert_eq!(Model::SLogic16U3.max_samplerate(8), 400_000_000);
         assert_eq!(Model::SLogic16U3.max_samplerate(4), 800_000_000);
+
+        let r = Model::SLogic32U3.samplerates();
+        assert_eq!(r[0], 1_400_000_000);
+        assert!(r.contains(&700_000_000) && r.contains(&800_000_000) && r.contains(&350_000_000));
+        assert_eq!(Model::SLogic32U3.max_samplerate(32), 200_000_000);
+        assert_eq!(Model::SLogic32U3.max_samplerate(16), 400_000_000);
+        assert_eq!(Model::SLogic32U3.max_samplerate(8), 800_000_000);
+        assert_eq!(Model::SLogic32U3.max_samplerate(4), 1_400_000_000);
     }
 
     #[test]

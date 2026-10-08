@@ -29,10 +29,12 @@ pub struct Args {
     #[arg(short, long)]
     input: Option<PathBuf>,
     /// Sample rate, e.g. 20M, 100M. Defaults to the device's maximum for the
-    /// channel count (16ch: 200M, 8ch: 400M, 4ch: 800M); 20M with --demo.
+    /// channel count (SLogic16 U3: 16ch 200M, 8ch 400M, 4ch 800M; SLogic32 U3:
+    /// 32ch 200M, 16ch 400M, 8ch 800M, 4ch 1400M); 20M with --demo.
     #[arg(short, long, value_parser = parse_rate)]
     samplerate: Option<u64>,
-    /// Number of channels to capture (4, 8 or 16).
+    /// Number of channels to capture: 4, 8 or 16 (SLogic16 U3), up to 32
+    /// (SLogic32 U3).
     #[arg(short, long, default_value_t = 16)]
     channels: usize,
     /// Input threshold in volts (default: device default, about 2.0 V).
@@ -287,7 +289,7 @@ fn info(path: &std::path::Path) -> std::io::Result<()> {
         println!("{k:<11} {v}");
     }
     let n = m.channels;
-    let mask = if n >= 16 { 0xffff } else { (1u16 << n) - 1 };
+    let mask = visgrok::block::channel_mask(n);
     let mut det = EdgeDetector::new(mask);
     let mut stats = Stats::new(n);
     let mut tr: Vec<Transition> = Vec::new();
