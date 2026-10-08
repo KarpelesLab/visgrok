@@ -77,6 +77,41 @@ reads it through a sample store (a 0.2% overview for zoomed-out views, raw
 chunks for zoomed-in ones). `.sr`/`.vcd` files are imported once into a
 `.vgk` next to them. It binds to localhost by default (`--listen` to change).
 
+### Querying a capture (scripts and agents)
+
+One-shot commands answer questions about a recorded capture without the
+TUI or the browser. Each takes the capture file, uses the roles saved in its
+sidecar (override with `-r CH=ROLE`, where CH is a number or a channel name;
+`--no-sidecar` ignores the saved roles), and prints JSON with `--json`.
+Times are seconds (`39.67`), with a unit (`120ms`, `35us`) or a sample index
+(`#7935109874`); `--session N` selects one reset-delimited session.
+
+```sh
+visgrok summary capture.vgk            # channels, activity, buses, decoders, sessions
+visgrok sessions capture.vgk           # e.g. smart card resets and what each one carried
+visgrok events capture.vgk --from 39.6 --to 39.7 -d ISO
+visgrok events capture.vgk --grep ATR --json
+visgrok event capture.vgk --at 46.177  # one event: description, payload, every bit and field
+visgrok data capture.vgk -d SSD1306    # byte streams: UART/card characters, SPI words, display commands and writes
+visgrok screens capture.vgk -o screens # each distinct display screen as a PNG
+visgrok clock capture.vgk --ch CLK8M --session 1   # frequency, period spread, duty, drift
+visgrok edges capture.vgk --ch RESET   # raw transitions
+visgrok levels capture.vgk --at 46.18  # every channel's level at a moment
+```
+
+For a smart card bus recorded on CLK8M / RESET / UART with stale roles in
+the sidecar:
+
+```sh
+visgrok sessions capture.vgk --no-sidecar -r CLK8M=iso-clk -r RESET=iso-rst -r UART=iso-io
+```
+
+Decoding a long capture takes a while the first time; the result is cached
+next to it (`capture.vgk.events`) and reused while the file and the roles and
+decoder settings stay the same (`--no-cache` decodes again). Captures without
+an activity overview (written by visgrok before 0.2) make `summary` read the
+whole file; `visgrok convert old.vgk new.vgk` adds one.
+
 ### Decoding your buses
 
 Assign pins with `-r CH=ROLE` (or interactively: select a channel, press Enter):
