@@ -47,17 +47,42 @@ pub struct UartConfig {
     pub parity: Parity,
     /// Inverted line (idle low).
     pub inverted: bool,
+    /// Stop bits (1 or 2). All are checked; a low stop bit is a framing
+    /// error. ISO 7816 characters use 2 (the guard time).
+    pub stop_bits: u8,
+    /// Detect data bits, parity and stop bits from the first frames
+    /// (overrides the three fields above once detected).
+    pub auto_format: bool,
 }
 
 impl UartConfig {
     /// 8N1 at a fixed `baud`.
     pub fn new(channel: u8, baud: u32) -> UartConfig {
-        UartConfig { channel, baud: Some(baud), auto: false, data_bits: 8, parity: Parity::None, inverted: false }
+        UartConfig { channel, baud: Some(baud), auto: false, data_bits: 8, parity: Parity::None, inverted: false, stop_bits: 1, auto_format: false }
     }
 
     /// 8N1 with automatic, adaptive baud rate detection.
     pub fn auto(channel: u8) -> UartConfig {
-        UartConfig { channel, baud: None, auto: true, data_bits: 8, parity: Parity::None, inverted: false }
+        UartConfig {
+            channel,
+            baud: None,
+            auto: true,
+            data_bits: 8,
+            parity: Parity::None,
+            inverted: false,
+            stop_bits: 1,
+            auto_format: true,
+        }
+    }
+
+    /// The frame format as text, e.g. `8E2`.
+    pub fn format(&self) -> String {
+        let p = match self.parity {
+            Parity::None => 'N',
+            Parity::Even => 'E',
+            Parity::Odd => 'O',
+        };
+        format!("{}{p}{}", self.data_bits, self.stop_bits)
     }
 }
 
@@ -73,6 +98,16 @@ pub fn nice_baud(measured: f64) -> u32 {
     }
     let mag = 10f64.powi(measured.log10().floor() as i32 - 2);
     ((measured / mag).round() * mag) as u32
+}
+
+/// Outcome of frame format detection.
+enum Detect {
+    /// Not enough frames yet.
+    Wait,
+    /// No format fits: the "frames" are noise.
+    NoFit,
+    /// Detected data bits, parity and stop bits.
+    Found(u8, Parity, u8),
 }
 
 /// Result of decoding one frame.
@@ -97,6 +132,10 @@ pub struct Uart {
     edges: VecDeque<(u64, bool)>,
     /// Pulses shorter than this many samples are ignored.
     glitch: u64,
+    /// The frame format is known (given, or detected).
+    format_known: bool,
+    /// Baud rate last reported.
+    announced: Option<u32>,
 }
 
 /// Kept for compatibility with the earlier name.
@@ -109,7 +148,8 @@ impl Uart {
         // 25 ns: well below a bit at any rate this decoder can follow (4 Mbaud
         // = 250 ns), well above typical probe glitches.
         let glitch = (samplerate as f64 * 25e-9) as u64;
-        Uart { cfg, samplerate, bit, edges: VecDeque::new(), glitch }
+        let format_known = !cfg.auto_format;
+        Uart { cfg, samplerate, bit, edges: VecDeque::new(), glitch, format_known, announced: None }
     }
 
     /// Current baud rate estimate.
@@ -118,7 +158,11 @@ impl Uart {
     }
 
     fn frame_bits(&self) -> u32 {
-        1 + self.cfg.data_bits as u32 + (self.cfg.parity != Parity::None) as u32 + 1
+        1 + self.cfg.data_bits as u32 + (self.cfg.parity != Parity::None) as u32 + self.stop_bits()
+    }
+
+    fn stop_bits(&self) -> u32 {
+        self.cfg.stop_bits.clamp(1, 2) as u32
     }
 
     /// Estimates the bit time from edges starting at index `from`, using the
@@ -213,9 +257,10 @@ impl Uart {
                 _ => (ones + p).is_multiple_of(2),
             };
         }
-        let framing_error = !level_at(mid(nbits - 1));
+        let stops = self.stop_bits();
+        let framing_error = (nbits - stops..nbits).any(|k| !level_at(mid(k)));
         // Pulses that start and end inside the frame (before the stop bit).
-        let limit = t0 + ((nbits as f64 - 1.0) * bit) as u64;
+        let limit = t0 + ((nbits - stops) as f64 * bit) as u64;
         let mut min_width = None;
         let mut prev = t0;
         for &(at, _) in self.edges.iter().skip(i + 1) {
@@ -230,11 +275,96 @@ impl Uart {
     }
 
     fn set_bit(&mut self, bit: f64, at: u64, out: &mut Vec<Annotation>) {
-        let old = self.baud().map(nice_baud);
         self.bit = Some(bit);
-        let new = nice_baud(self.samplerate as f64 / bit);
-        if old != Some(new) {
+        if self.format_known {
+            self.announce(at, out);
+        }
+    }
+
+    fn announce(&mut self, at: u64, out: &mut Vec<Annotation>) {
+        let Some(b) = self.baud() else { return };
+        let new = nice_baud(b);
+        if self.announced != Some(new) {
+            self.announced = Some(new);
             out.push(Annotation { start: at, end: at, event: Event::UartBaud { baud: new } });
+        }
+    }
+
+    /// Detects the frame format from the buffered frames at `bit` samples
+    /// per bit (see [`Detect`]).
+    fn detect_format(&self, bit: f64, now: u64) -> Detect {
+        // Sample bits 1..=11 of up to 16 frames, plus start-to-start spacing.
+        let mut frames: Vec<([bool; 12], Option<f64>)> = Vec::new();
+        let mut i = 0;
+        let n = self.edges.len();
+        let first = self.edges.front().map_or(now, |e| e.0);
+        while frames.len() < 16 {
+            while i < n && self.edges[i].1 {
+                i += 1;
+            }
+            if i >= n {
+                break;
+            }
+            let t0 = self.edges[i].0;
+            if t0 + (11.6 * bit) as u64 >= now {
+                break;
+            }
+            let mut bits = [false; 12];
+            let mut k = i;
+            let mut level = false;
+            for (b, slot) in bits.iter_mut().enumerate().skip(1) {
+                let x = t0 + ((b as f64 + 0.5) * bit) as u64;
+                while k + 1 < n && self.edges[k + 1].0 <= x {
+                    k += 1;
+                    level = self.edges[k].1;
+                }
+                *slot = level;
+            }
+            // The next start bit can't come before 9.5 bit times.
+            let next = (i + 1..n).find(|&j| !self.edges[j].1 && self.edges[j].0 as f64 >= t0 as f64 + 9.5 * bit);
+            frames.push((bits, next.map(|j| (self.edges[j].0 - t0) as f64 / bit)));
+            match next {
+                Some(j) => i = j,
+                None => break,
+            }
+        }
+        let waited = (now - first) as f64 / bit;
+        if frames.len() < 6 && frames.len() < 16 && waited < 2000.0 {
+            return Detect::Wait;
+        }
+        if frames.is_empty() {
+            return Detect::NoFit;
+        }
+        let min_spacing = frames.iter().filter_map(|f| f.1).map(|s| s.round() as u32).min();
+        let fits = |d: usize, p: Parity| -> bool {
+            frames.iter().all(|(bits, spacing)| {
+                let len = spacing.map_or(12, |s| s.round() as usize).min(12);
+                let has_p = p != Parity::None;
+                let stop = 1 + d + has_p as usize;
+                if stop >= len || !bits[stop] {
+                    return false;
+                }
+                if has_p {
+                    let ones = bits[1..=d + 1].iter().filter(|&&b| b).count();
+                    if (p == Parity::Even) != (ones % 2 == 0) {
+                        return false;
+                    }
+                }
+                true
+            })
+        };
+        let enough = frames.len() >= 4;
+        let candidates = [(8, Parity::Even), (8, Parity::Odd), (8, Parity::None), (7, Parity::Even), (7, Parity::Odd)];
+        let found = candidates.iter().copied().find(|&(d, p)| {
+            fits(d, p) && (p == Parity::None || enough || !fits(8, Parity::None))
+        });
+        match found {
+            Some((d, p)) => {
+                let used = 1 + d as u32 + (p != Parity::None) as u32;
+                let stop = min_spacing.map_or(1, |m| m.saturating_sub(used).clamp(1, 2)) as u8;
+                Detect::Found(d as u8, p, stop)
+            }
+            None => Detect::NoFit,
         }
     }
 
@@ -280,6 +410,35 @@ impl Uart {
                     }
                 }
             };
+            if !self.format_known {
+                match self.detect_format(bit, now) {
+                    Detect::Wait => return,
+                    Detect::NoFit => {
+                        // Locked on something that isn't serial data: drop
+                        // this burst and start over.
+                        let (_, n, _) = self.estimate_burst(0, true);
+                        self.edges.drain(..n.max(1).min(self.edges.len()));
+                        if self.cfg.baud.is_none() {
+                            self.bit = None;
+                        }
+                        continue;
+                    }
+                    Detect::Found(d, p, stop) => {
+                        self.cfg.data_bits = d;
+                        self.cfg.parity = p;
+                        // Two stop bits and one stop bit plus idle time look
+                        // the same; report the count, but only enforce one so
+                        // back-to-back traffic (e.g. after a speed change)
+                        // still decodes.
+                        self.cfg.stop_bits = stop;
+                        let label = self.cfg.format();
+                        self.cfg.stop_bits = 1;
+                        self.format_known = true;
+                        self.announce(t0, out);
+                        out.push(Annotation { start: t0, end: t0, event: Event::UartFormat { format: label } });
+                    }
+                }
+            }
             let nbits = self.frame_bits();
             let stop_mid = t0 + ((nbits as f64 - 0.5) * bit) as u64;
             if stop_mid >= now {
@@ -419,12 +578,13 @@ mod tests {
         d.advance(end + 100_000, &mut out);
         assert_eq!(bytes_of(&out), b"\x55AT+SPEED?\r\n");
         assert!(out.iter().any(|a| a.event == Event::UartBaud { baud: 21_500 }), "{out:?}");
+        assert!(out.iter().any(|a| a.event == Event::UartFormat { format: "8N2".into() } || a.event == Event::UartFormat { format: "8N1".into() }), "{out:?}");
     }
 
     #[test]
-    fn locks_after_power_on_noise_with_parity() {
+    fn locks_after_power_on_noise_8e2() {
         // 200 MHz: a burst of 1-50 sample glitches and odd pulses (like a
-        // supply ramp), then an 8E1 ATR at 21.5 kbaud.
+        // supply ramp), then an 8E2 ATR at 21.5 kbaud.
         let sr = 200_000_000u64;
         let mut tr = Vec::new();
         let mut level = 0u16;
@@ -459,9 +619,8 @@ mod tests {
                 cur = l;
             }
         }
-        let mut cfg = UartConfig::auto(0);
-        cfg.parity = Parity::Even;
-        let mut d = Uart::new(cfg, sr);
+        // Fully automatic: rate and format (8E2) detected from the traffic.
+        let mut d = Uart::new(UartConfig::auto(0), sr);
         d.init(0);
         let mut out = Vec::new();
         for t in &tr {
@@ -477,6 +636,51 @@ mod tests {
             })
             .collect();
         assert_eq!(got, atr);
+        let fmts: Vec<_> = out
+            .iter()
+            .filter_map(|a| match &a.event {
+                Event::UartFormat { format } => Some(format.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(fmts, vec!["8E2".to_string()]);
+        // Nothing decoded from the noise.
+        assert!(out.iter().all(|a| a.start >= start), "{:?}", &out[..3.min(out.len())]);
+    }
+
+    #[test]
+    fn second_stop_bit_is_checked() {
+        // 8E2 frame of 0x00 whose second stop bit is low (a new start bit
+        // arrives one bit early): the first frame is a framing error.
+        let bit = 100.0;
+        let mut levels = vec![true; 5];
+        let frame = |levels: &mut Vec<bool>, b: u8, stop2: bool| {
+            levels.push(false);
+            levels.extend((0..8).map(|k| b >> k & 1 != 0));
+            levels.push(b.count_ones() % 2 == 1);
+            levels.push(true);
+            levels.push(stop2);
+        };
+        frame(&mut levels, 0x55, false);
+        levels.extend([true; 30]);
+        let mut tr = Vec::new();
+        let mut cur = true;
+        for (i, &l) in levels.iter().enumerate() {
+            if l != cur {
+                tr.push(Transition { at: (i as f64 * bit) as u64, prev: cur as u16, now: l as u16 });
+                cur = l;
+            }
+        }
+        let mut cfg = UartConfig::new(0, 10_000);
+        cfg.parity = Parity::Even;
+        cfg.stop_bits = 2;
+        let mut d = Uart::new(cfg, 1_000_000);
+        let mut out = Vec::new();
+        for t in &tr {
+            d.transition(t, &mut out);
+        }
+        d.advance(100_000, &mut out);
+        assert!(matches!(out[0].event, Event::UartByte { value: 0x55, framing_error: true, parity_error: false }), "{out:?}");
     }
 
     #[test]

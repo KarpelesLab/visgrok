@@ -64,15 +64,16 @@ pub struct DecoderOptions {
     pub spi_protocol: SpiProtocol,
     /// UART decoders follow baud rate changes even when a rate is given.
     pub uart_auto: bool,
-    /// UART data bits (5..=9).
-    pub uart_data_bits: u8,
-    /// UART parity.
-    pub uart_parity: Parity,
+    /// UART frame format (data bits, parity, stop bits); `None` detects it.
+    pub uart_format: Option<(u8, Parity, u8)>,
 }
 
-/// Parses a UART frame format such as `8N1`, `8E1`, `7O1` into data bits and
-/// parity (the stop bit count is not needed for decoding).
-pub fn parse_uart_format(s: &str) -> Result<(u8, Parity), String> {
+/// Parses a UART frame format such as `8N1`, `8E2`, `7O1` into data bits,
+/// parity and stop bits; `auto` gives `None` (detect from the traffic).
+pub fn parse_uart_format(s: &str) -> Result<Option<(u8, Parity, u8)>, String> {
+    if s.eq_ignore_ascii_case("auto") {
+        return Ok(None);
+    }
     let b = s.as_bytes();
     if b.len() < 2 || !(b'5'..=b'9').contains(&b[0]) {
         return Err(format!("bad UART format {s:?} (e.g. 8N1, 8E1, 8O2)"));
@@ -83,7 +84,12 @@ pub fn parse_uart_format(s: &str) -> Result<(u8, Parity), String> {
         b'O' => Parity::Odd,
         _ => return Err(format!("bad parity in {s:?} (N, E or O)")),
     };
-    Ok((b[0] - b'0', parity))
+    let stop = match b.get(2) {
+        None | Some(b'1') => 1,
+        Some(b'2') => 2,
+        _ => return Err(format!("bad stop bits in {s:?} (1 or 2)")),
+    };
+    Ok(Some((b[0] - b'0', parity, stop)))
 }
 
 impl Default for DecoderOptions {
@@ -93,8 +99,7 @@ impl Default for DecoderOptions {
             spi_cs_active_high: false,
             spi_protocol: SpiProtocol::Raw,
             uart_auto: true,
-            uart_data_bits: 8,
-            uart_parity: Parity::None,
+            uart_format: None,
         }
     }
 }
@@ -217,8 +222,12 @@ impl Analyzer {
                     let mut cfg = UartConfig::auto(i as u8);
                     cfg.baud = (*baud != 0).then_some(*baud);
                     cfg.auto = opts.uart_auto || *baud == 0;
-                    cfg.data_bits = opts.uart_data_bits;
-                    cfg.parity = opts.uart_parity;
+                    if let Some((d, p, stop)) = opts.uart_format {
+                        cfg.data_bits = d;
+                        cfg.parity = p;
+                        cfg.stop_bits = stop;
+                        cfg.auto_format = false;
+                    }
                     out.push(Box::new(Uart::new(cfg, self.samplerate)))
                 }
                 Role::I2cScl { sda } => out.push(Box::new(I2c::new(i as u8, *sda))),
@@ -414,7 +423,11 @@ mod tests {
         for (i, c) in data.chunks(65536).enumerate() {
             a2.process(&Block::new(i as u64 * 65536, 1, c.to_vec()));
         }
-        let uart: Vec<_> = a2.annotations.iter().filter(|t| t.decoder == 0).collect();
+        let uart: Vec<_> = a2
+            .annotations
+            .iter()
+            .filter(|t| t.decoder == 0 && matches!(t.annotation.event, crate::decode::Event::UartByte { .. }))
+            .collect();
         assert_eq!(uart.len(), 300);
         let i2c_addr = a2
             .annotations

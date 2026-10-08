@@ -32,6 +32,11 @@ pub enum Event {
     },
     /// UART line held low for a whole frame or longer.
     UartBreak,
+    /// The UART decoder detected the frame format.
+    UartFormat {
+        /// e.g. `8E2`.
+        format: String,
+    },
     /// The UART decoder locked onto (or switched to) a baud rate.
     UartBaud {
         /// New rate in bits per second.

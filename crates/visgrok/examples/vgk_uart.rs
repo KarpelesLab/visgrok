@@ -1,5 +1,5 @@
 //! Decodes one channel of a .vgk capture as UART.
-//! Usage: vgk_uart FILE CHANNEL [FORMAT e.g. 8N1/8E1/8E2] [FROM_S] [TO_S]
+//! Usage: vgk_uart FILE CHANNEL [FORMAT e.g. 8N1/8E2] [FROM_S] [TO_S]
 use visgrok::decode::uart::{Parity, Uart, UartConfig};
 use visgrok::decode::{Decoder, Event};
 use visgrok::vgk::VgkReader;
@@ -20,6 +20,7 @@ fn main() -> std::io::Result<()> {
         b'O' => Parity::Odd,
         _ => Parity::None,
     };
+    cfg.stop_bits = fmt.get(2).map_or(1, |c| c - b'0');
     let mut d = Uart::new(cfg, sr);
     let mut det = EdgeDetector::new(1 << ch);
     let mut tr = Vec::new();

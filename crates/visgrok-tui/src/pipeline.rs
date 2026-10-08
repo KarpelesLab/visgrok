@@ -370,6 +370,7 @@ pub fn format_event(e: &Event) -> String {
             s
         }
         Event::UartBaud { baud } => format!("── baud rate {baud} ──"),
+        Event::UartFormat { format } => format!("── frame format {format} ──"),
         Event::Protocol { text, .. } => text.clone(),
     }
 }
