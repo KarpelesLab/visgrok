@@ -6,6 +6,7 @@
 //! - [`stats`]: per-channel timing statistics.
 //! - [`roles`]: channel role assignment and auto-detection.
 //! - [`decode`]: streaming protocol decoders (UART, I2C, SPI).
+//! - [`source`]: the [`Source`] trait for block streams; [`synth`]: a synthetic source.
 //! - [`srzip`]: streaming sigrok `.sr` session writer.
 
 pub mod analyzer;
@@ -13,8 +14,11 @@ pub mod block;
 pub mod decode;
 pub mod edges;
 pub mod roles;
+pub mod source;
 pub mod srzip;
 pub mod stats;
+pub mod synth;
 
 pub use block::Block;
 pub use edges::{EdgeDetector, Transition};
+pub use source::{CaptureInfo, Source};

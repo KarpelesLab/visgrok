@@ -167,20 +167,23 @@ impl Analyzer {
         self.stats.advance(block.end());
         self.corr.process(&self.scratch);
 
-        self.ann_scratch.clear();
+        let mut produced: Vec<Tagged> = Vec::new();
         for (di, d) in self.decoders.iter_mut().enumerate() {
             let mask = d.channels();
+            self.ann_scratch.clear();
             for t in self.scratch.iter().filter(|t| t.changed() & mask != 0) {
                 d.transition(t, &mut self.ann_scratch);
             }
             d.advance(block.end(), &mut self.ann_scratch);
-            for a in self.ann_scratch.drain(..) {
-                self.annotation_count += 1;
-                if self.annotations.len() == ANNOTATION_HISTORY {
-                    self.annotations.pop_front();
-                }
-                self.annotations.push_back(Tagged { decoder: di, annotation: a });
+            produced.extend(self.ann_scratch.drain(..).map(|a| Tagged { decoder: di, annotation: a }));
+        }
+        produced.sort_by_key(|t| t.annotation.start);
+        for t in produced {
+            self.annotation_count += 1;
+            if self.annotations.len() == ANNOTATION_HISTORY {
+                self.annotations.pop_front();
             }
+            self.annotations.push_back(t);
         }
 
         let skip = self.scratch.len().saturating_sub(WAVE_HISTORY);
