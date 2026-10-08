@@ -32,7 +32,7 @@ pub struct SdConfig {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Resp {
+pub(crate) enum Resp {
     None,
     R1,
     R1b,
@@ -765,7 +765,7 @@ fn dedup(mut v: Vec<usize>) -> Vec<usize> {
 }
 
 /// Describes a CMD42 lock/unlock data block.
-fn lock_data(b: &[u8]) -> String {
+pub(crate) fn lock_data(b: &[u8]) -> String {
     if b.is_empty() {
         return String::new();
     }
@@ -801,12 +801,12 @@ fn lock_data(b: &[u8]) -> String {
 }
 
 /// Reads `n` bits MSB-first from `bits[at..]`.
-fn field(bits: &[bool], at: usize, n: usize) -> u64 {
+pub(crate) fn field(bits: &[bool], at: usize, n: usize) -> u64 {
     bits[at..at + n].iter().fold(0u64, |v, &b| v << 1 | b as u64)
 }
 
 /// CRC7 (x^7 + x^3 + 1) over a bit sequence.
-fn crc7(bits: &[bool]) -> u8 {
+pub(crate) fn crc7(bits: &[bool]) -> u8 {
     let mut crc = 0u8;
     for &b in bits {
         let inv = b ^ (crc >> 6 & 1 != 0);
@@ -819,7 +819,7 @@ fn crc7(bits: &[bool]) -> u8 {
 }
 
 /// CRC16-CCITT (x^16 + x^12 + x^5 + 1, init 0) over a bit sequence.
-fn crc16(bits: &[bool]) -> u16 {
+pub(crate) fn crc16(bits: &[bool]) -> u16 {
     let mut crc = 0u16;
     for &b in bits {
         let inv = b ^ (crc >> 15 != 0);
@@ -831,7 +831,7 @@ fn crc16(bits: &[bool]) -> u16 {
     crc
 }
 
-fn vhs(v: u32) -> &'static str {
+pub(crate) fn vhs(v: u32) -> &'static str {
     match v {
         1 => "2.7-3.6V",
         2 => "low voltage range",
@@ -841,7 +841,7 @@ fn vhs(v: u32) -> &'static str {
 
 const STATES: [&str; 9] = ["idle", "ready", "ident", "stby", "tran", "data", "rcv", "prg", "dis"];
 
-fn r1_status(s: u32) -> String {
+pub(crate) fn r1_status(s: u32) -> String {
     let flags = [
         (31, "OUT_OF_RANGE"),
         (30, "ADDRESS_ERROR"),
@@ -874,7 +874,7 @@ fn r1_status(s: u32) -> String {
     out
 }
 
-fn r6_status(s: u32) -> String {
+pub(crate) fn r6_status(s: u32) -> String {
     // R6 packs status bits 23, 22, 19 into bits 15, 14, 13.
     let full = (s >> 15 & 1) << 23 | (s >> 14 & 1) << 22 | (s >> 13 & 1) << 19 | (s & 0x1fff);
     r1_status(full)
@@ -885,7 +885,7 @@ fn reg_field(reg: &[bool], hi: usize, lo: usize) -> u64 {
     field(reg, 127 - hi, hi - lo + 1)
 }
 
-fn cid(reg: &[bool]) -> String {
+pub(crate) fn cid(reg: &[bool]) -> String {
     let ch = |hi: usize| -> char {
         let c = reg_field(reg, hi, hi - 7) as u8;
         if c.is_ascii_graphic() || c == b' ' { c as char } else { '.' }
@@ -905,7 +905,7 @@ fn cid(reg: &[bool]) -> String {
     )
 }
 
-fn csd(reg: &[bool]) -> String {
+pub(crate) fn csd(reg: &[bool]) -> String {
     let structure = reg_field(reg, 127, 126);
     let bytes = match structure {
         0 => {
@@ -933,7 +933,7 @@ fn csd(reg: &[bool]) -> String {
     )
 }
 
-fn command_info(idx: u8, app: bool) -> (&'static str, Resp) {
+pub(crate) fn command_info(idx: u8, app: bool) -> (&'static str, Resp) {
     use Resp::*;
     if app {
         return match idx {

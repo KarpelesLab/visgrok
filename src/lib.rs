@@ -19,6 +19,7 @@ pub mod block;
 pub mod decode;
 pub mod edges;
 pub mod formats;
+pub mod inspect;
 pub mod json;
 pub mod pool;
 pub mod roles;

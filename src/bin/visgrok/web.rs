@@ -809,7 +809,8 @@ impl Session {
                 let store = self.store()?;
                 let start = msg.get("start").and_then(Json::num)?.max(0.0) as u64;
                 let ch = msg.get("channel").and_then(Json::num).unwrap_or(0.0) as u8;
-                let Some((e, before, after)) = store.event_with_context(start, ch, 6) else {
+                let end = msg.get("end").and_then(Json::num).map(|e| e.max(0.0) as u64);
+                let Some((e, before, after)) = store.event_with_context(start, ch, end, 6) else {
                     return Some(r#"{"type":"error","message":"event not found"}"#.to_string());
                 };
                 let hex: String = e
@@ -819,11 +820,12 @@ impl Session {
                     .unwrap_or_default();
                 let list = |v: &[StoredEvent]| v.iter().map(event_json).collect::<Vec<_>>().join(",");
                 Some(format!(
-                    r#"{{"type":"event","ev":{},"data":{},"before":[{}],"after":[{}]}}"#,
+                    r#"{{"type":"event","ev":{},"data":{},"before":[{}],"after":[{}],"inspect":{}}}"#,
                     event_json(&e),
                     jstr(&hex),
                     list(&before),
-                    list(&after)
+                    list(&after),
+                    inspect_json(&store, &e)
                 ))
             }
             "seek" => {
@@ -847,6 +849,77 @@ impl Session {
 }
 
 /// `[start, end, channel, source, text, payload bytes]`.
+/// The lines an event was decoded from around it, and its bits and fields
+/// (see `visgrok::inspect`).
+fn inspect_json(store: &SampleStore, e: &StoredEvent) -> String {
+    use visgrok::inspect::{self, Place, Request};
+    const MAX_EDGES: usize = 200_000;
+    let lines = inspect::lines(&e.source);
+    if lines.is_empty() {
+        return "null".into();
+    }
+    // UART timing as the decoder last reported it.
+    let samplerate = store.info().samplerate as f64;
+    let baud = store
+        .last_event(e.start + 1, &e.source, 100_000, |t| t.starts_with("── baud rate "))
+        .and_then(|b| b.text.trim_start_matches("── baud rate ").split(' ').next()?.parse::<f64>().ok());
+    let format = store
+        .last_event(e.start + 1, &e.source, 100_000, |t| t.starts_with("── frame format "))
+        .and_then(|f| f.text.trim_start_matches("── frame format ").split(' ').next().map(str::to_string));
+    let req = Request {
+        source: &e.source,
+        start: e.start,
+        end: e.end,
+        text: &e.text,
+        data: e.data.as_deref(),
+        bit_time: baud.filter(|&b| b > 0.0).map(|b| samplerate / b),
+        format: format.as_deref(),
+    };
+    let (ws, we) = inspect::window(&req);
+    let Ok(sig) = store.signal(ws, we, inspect::mask(&e.source)) else {
+        return "null".into();
+    };
+    let fields = inspect::inspect(&req, &sig);
+    let lines_json: Vec<String> = lines
+        .iter()
+        .map(|&(ch, role)| {
+            let edges = sig.edges(ch, sig.start, sig.end);
+            let cut = edges.len() > MAX_EDGES;
+            let list: Vec<String> = edges.iter().take(MAX_EDGES).map(|x| x.0.to_string()).collect();
+            format!(
+                "[{ch},{},{},[{}],{cut}]",
+                jstr(role),
+                sig.level(ch, sig.start) as u8,
+                list.join(",")
+            )
+        })
+        .collect();
+    let fields_json: Vec<String> = fields
+        .iter()
+        .map(|f| {
+            let place = match f.place {
+                Place::Line(ch) => ch.to_string(),
+                Place::Row(r) => jstr(r),
+            };
+            format!(
+                "[{},{},{place},{},{},{}]",
+                f.start,
+                f.end,
+                jstr(&f.label),
+                jstr(&f.detail),
+                f.bad as u8
+            )
+        })
+        .collect();
+    format!(
+        r#"{{"start":{},"end":{},"lines":[{}],"fields":[{}]}}"#,
+        sig.start,
+        sig.end,
+        lines_json.join(","),
+        fields_json.join(",")
+    )
+}
+
 fn event_json(e: &StoredEvent) -> String {
     format!(
         r#"[{},{},{},{},{},{}]"#,

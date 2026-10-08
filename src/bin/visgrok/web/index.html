@@ -59,7 +59,7 @@ footer { display: grid; grid-template-columns: 1fr; border-top: 1px solid var(--
 #tip { position: fixed; z-index: 20; pointer-events: none; max-width: 520px; background: #1b2130; border: 1px solid #34405a; border-radius: 6px; padding: 6px 9px; font: 12px/1.45 ui-monospace, Menlo, monospace; color: #e8eefc; box-shadow: 0 6px 18px rgba(0,0,0,.5); white-space: pre-wrap; }
 #tip .src { color: var(--accent); }
 #modalbg { position: fixed; inset: 0; z-index: 30; background: rgba(5,7,10,.6); display: flex; align-items: center; justify-content: center; }
-#modal { width: min(900px, 94vw); max-height: 86vh; overflow: auto; background: var(--panel); border: 1px solid #34405a; border-radius: 10px; padding: 14px 18px 16px; box-shadow: 0 14px 40px rgba(0,0,0,.6); }
+#modal { width: min(1100px, 96vw); max-height: 86vh; overflow: auto; background: var(--panel); border: 1px solid #34405a; border-radius: 10px; padding: 14px 18px 16px; box-shadow: 0 14px 40px rgba(0,0,0,.6); }
 #modal h2 { margin: 0 0 4px; font-size: 16px; }
 #modal .meta { color: var(--dim); margin-bottom: 10px; }
 #modal .lines { font: 12.5px/1.55 ui-monospace, Menlo, monospace; white-space: pre-wrap; background: #0d0f13; border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; margin: 8px 0; }
@@ -70,6 +70,14 @@ footer { display: grid; grid-template-columns: 1fr; border-top: 1px solid var(--
 #modal .ctx .cur { background: #1d3557; }
 #modal .ctx .t { color: var(--dim); text-align: right; }
 #modal .bar { display: flex; gap: 8px; justify-content: flex-end; margin-top: 10px; }
+#isig { display: block; width: 100%; background: #0d0f13; border: 1px solid var(--line); border-radius: 6px; cursor: grab; }
+#iinfo { min-height: 18px; margin: 4px 2px 0; font: 12px/1.45 ui-monospace, Menlo, monospace; color: var(--dim); white-space: pre-wrap; }
+#iinfo b { color: #e8eefc; font-weight: 600; }
+#modal .ftab div { display: grid; grid-template-columns: 96px 70px 150px 1fr; gap: 10px; padding: 1px 6px; cursor: pointer; font: 12px/1.5 ui-monospace, Menlo, monospace; border-radius: 4px; }
+#modal .ftab div:hover { background: #1d2230; }
+#modal .ftab .t, #modal .ftab .r { color: var(--dim); }
+#modal .ftab .t { text-align: right; }
+#modal .ftab .bad { color: #ff8a8a; }
 #modal h3 { font-size: 12px; color: var(--dim); margin: 12px 0 4px; font-weight: 600; text-transform: uppercase; letter-spacing: .5px; }
 @media (max-width: 760px) { #main { grid-template-columns: 1fr; } #chans { display: none; } }
 </style>
@@ -271,6 +279,7 @@ function shortLabel(text) {
   m = /^(R\d+b?|R[1-7])\s*\(/.exec(t); if (m) return m[1];
   const colon = t.indexOf(":");
   if (colon > 0 && colon <= 32) return t.slice(0, colon);
+  m = /^([^,;]{3,28})[,;]/.exec(t); if (m) return m[1];
   m = /^([0-9a-f]{2}(?: '.')?)(?:\s|$)/.exec(t); if (m) return m[1];
   if (t.length <= 28) return t;
   let out = "";
@@ -434,8 +443,8 @@ window.addEventListener("keydown", (e) => {
   if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
   if (modalEv) {
     if (e.key === "Escape") closeModal();
-    else if (e.key === "ArrowLeft" && modalEv.before.length) { const x = modalEv.before[modalEv.before.length - 1]; openEvent(x[0], x[2]); }
-    else if (e.key === "ArrowRight" && modalEv.after.length) { const x = modalEv.after[0]; openEvent(x[0], x[2]); }
+    else if (e.key === "ArrowLeft" && modalEv.before.length) { const x = modalEv.before[modalEv.before.length - 1]; openEvent(x[0], x[2], x[1]); }
+    else if (e.key === "ArrowRight" && modalEv.after.length) { const x = modalEv.after[0]; openEvent(x[0], x[2], x[1]); }
     else return;
     e.preventDefault(); return;
   }
@@ -543,12 +552,12 @@ wave.addEventListener("mouseup", (e) => {
   const d0 = downAt; downAt = null;
   if (!d0 || Math.hypot(e.clientX - d0[0], e.clientY - d0[1]) > 4 || e.shiftKey) return;
   const ev = eventAt(e.clientX, e.clientY);
-  if (ev) openEvent(ev[0], ev[2]);
+  if (ev) openEvent(ev[0], ev[2], ev[1]);
 });
 
 let modalEv = null;
-function openEvent(start, channel) { send({ cmd: "event", start, channel }); }
-function closeModal() { $("modalbg").hidden = true; modalEv = null; }
+function openEvent(start, channel, end) { send({ cmd: "event", start, channel, end }); }
+function closeModal() { $("modalbg").hidden = true; modalEv = null; iv = null; }
 $("modalbg").addEventListener("click", (e) => { if (e.target.id === "modalbg") closeModal(); });
 function hexdump(hex) {
   const out = [];
@@ -566,19 +575,178 @@ function onEvent(m) {
   modalEv = m; $("tip").hidden = true;
   const chName = (st.chans && st.chans[ch] && st.chans[ch].name) || "D" + ch;
   // Neighbours are timed relative to this event.
-  const row = (x, cur) => `<div class="${cur ? "cur" : ""}" data-s="${x[0]}" data-c="${x[2]}"><span class="t">${cur ? fmtTime(s / sr) : (x[0] >= s ? "+" : "") + fmtTime((x[0] - s) / sr)}</span><span>${esc(x[4])}</span></div>`;
+  const row = (x, cur) => `<div class="${cur ? "cur" : ""}" data-s="${x[0]}" data-e="${x[1]}" data-c="${x[2]}"><span class="t">${cur ? fmtTime(s / sr) : (x[0] >= s ? "+" : "") + fmtTime((x[0] - s) / sr)}</span><span>${esc(x[4])}</span></div>`;
   $("modal").innerHTML =
     `<h2>${esc(shortLabel(text))}</h2>` +
     `<div class="meta">${esc(src)} · ${esc(chName)} · at ${fmtTime(s / sr)} (#${s}) · lasts ${fmtTime(Math.max(0, e - s) / sr)}${n ? ` · ${n} bytes` : ""}</div>` +
     // The hexdump below replaces the inline preview ("… · 01 10 6d …").
     `<div class="lines">${textLines(m.data ? text.replace(/ · [0-9a-f]{2}(?: [0-9a-f]{2})*.*$/, "") : text).map(esc).join("\n")}</div>` +
+    (m.inspect ? `<h3>Signals</h3><canvas id="isig"></canvas><div id="iinfo"></div>` + fieldTable(m.inspect, s) : "") +
     (m.data ? `<h3>Payload (${m.data.length / 2} bytes)</h3><div class="hex">${hexdump(m.data)}</div>` : "") +
     `<h3>Around it (${esc(shortSrc(src))})</h3><div class="ctx">${m.before.map((x) => row(x)).join("")}${row(m.ev, true)}${m.after.map((x) => row(x)).join("")}</div>` +
     `<div class="bar"><button id="mzoom">Zoom to event</button><button id="mclose">Close (Esc)</button></div>`;
   $("modalbg").hidden = false;
+  if (m.inspect) setupInspect(m.inspect, s, e);
   $("mclose").onclick = closeModal;
   $("mzoom").onclick = () => { const span = Math.max((e - s) * 6, 64); follow = false; view.start = (s + e) / 2 - span / 2; view.end = view.start + span; clampView(); changed(); closeModal(); };
-  $("modal").querySelectorAll(".ctx div").forEach((d) => d.onclick = () => openEvent(+d.dataset.s, +d.dataset.c));
+  $("modal").querySelectorAll(".ctx div").forEach((d) => d.onclick = () => openEvent(+d.dataset.s, +d.dataset.c, +d.dataset.e));
+}
+
+// ------------------------------------------------------------ the event's signals, bit by bit
+// The lines the event was decoded from, with the value of each bit at its
+// sampling point and the fields the bits form (from the server's
+// breakdown). Wheel zooms, drag pans, double-click fits the event.
+const IROW = 30, IGUT = 104, IRULER = 18;
+let iv = null;
+const ifHelp = "hover a bit or field for its meaning · wheel: zoom · drag: pan · double-click: fit";
+function fieldTable(ins, s) {
+  const counts = {};
+  for (const f of ins.fields) if (typeof f[2] === "string") counts[f[2]] = (counts[f[2]] || 0) + 1;
+  const rows = ins.fields.filter((f) => typeof f[2] === "string" && f[2] !== "bytes" && (counts[f[2]] <= 64 || f[2] === "frame"))
+    .sort((a, b) => a[0] - b[0]);
+  if (!rows.length) return "";
+  const sr = st.samplerate;
+  return `<h3>Fields</h3><div class="ftab">` + rows.slice(0, 400).map((f) =>
+    `<div data-a="${f[0]}" data-b="${f[1]}"><span class="t">${(f[0] >= s ? "+" : "") + fmtTime((f[0] - s) / sr)}</span><span class="r">${esc(f[2])}</span><span class="${f[5] ? "bad" : ""}">${esc(f[3])}</span><span class="${f[5] ? "bad" : ""}">${esc(f[4])}</span></div>`).join("") + `</div>`;
+}
+function setupInspect(ins, s, e) {
+  const ann = [];
+  const byLine = {}, byRow = {};
+  for (const f of ins.fields) {
+    if (typeof f[2] === "number") (byLine[f[2]] ||= []).push(f);
+    else { if (!ann.includes(f[2])) ann.push(f[2]); (byRow[f[2]] ||= []).push(f); }
+  }
+  for (const l of [...Object.values(byLine), ...Object.values(byRow)]) l.sort((a, b) => a[0] - b[0]);
+  iv = { ins, s, e, ann, byLine, byRow, hover: null, drag: null };
+  fitInspect();
+  const c = $("isig");
+  c.style.height = (IRULER + (ins.lines.length + ann.length) * IROW + 4) + "px";
+  $("iinfo").textContent = ifHelp;
+  c.addEventListener("wheel", (ev) => {
+    ev.preventDefault();
+    const r = c.getBoundingClientRect(), t = ivTime(ev.clientX - r.left);
+    const k = Math.exp(ev.deltaY * 0.0015), span = iv.end - iv.start;
+    const ns = Math.min(Math.max(span * k, 16), iv.ins.end - iv.ins.start);
+    iv.start = t - (t - iv.start) * (ns / span); iv.end = iv.start + ns; clampInspect(); drawInspect();
+  }, { passive: false });
+  c.addEventListener("mousedown", (ev) => { iv.drag = { x: ev.clientX, start: iv.start, end: iv.end }; ev.stopPropagation(); });
+  c.addEventListener("dblclick", () => { fitInspect(); drawInspect(); });
+  c.addEventListener("mouseleave", () => { if (iv) { iv.hover = null; $("iinfo").textContent = ifHelp; drawInspect(); } });
+  $("modal").querySelectorAll(".ftab div").forEach((d) => d.onclick = () => {
+    const a = +d.dataset.a, b = +d.dataset.b, w = Math.max((b - a) * 3, 16);
+    iv.start = (a + b) / 2 - w / 2; iv.end = iv.start + w; clampInspect(); drawInspect();
+    const f = iv.ins.fields.find((x) => x[0] === a && x[1] === b && typeof x[2] === "string");
+    if (f) { iv.hover = f; showField(f); drawInspect(); }
+  });
+  requestAnimationFrame(drawInspect);
+}
+window.addEventListener("mousemove", (ev) => {
+  if (!iv) return;
+  const c = $("isig"); if (!c) return;
+  const r = c.getBoundingClientRect();
+  if (iv.drag) {
+    const d = ((iv.drag.x - ev.clientX) / (r.width - IGUT)) * (iv.drag.end - iv.drag.start);
+    iv.start = iv.drag.start + d; iv.end = iv.drag.end + d; clampInspect(); drawInspect(); return;
+  }
+  if (ev.clientX < r.left || ev.clientX > r.right || ev.clientY < r.top || ev.clientY > r.bottom) return;
+  const f = inspectFieldAt(ev.clientX - r.left, ev.clientY - r.top);
+  if (f !== iv.hover) { iv.hover = f; f ? showField(f) : ($("iinfo").textContent = ifHelp); drawInspect(); }
+});
+window.addEventListener("mouseup", () => { if (iv) iv.drag = null; });
+function fitInspect() {
+  const span = Math.max(iv.e - iv.s, 16), pad = span * 0.06;
+  iv.start = iv.s - pad; iv.end = iv.e + pad; clampInspect();
+}
+function clampInspect() {
+  const a = iv.ins.start, b = iv.ins.end, span = Math.min(iv.end - iv.start, b - a);
+  if (iv.start < a) iv.start = a;
+  if (iv.start + span > b) iv.start = b - span;
+  iv.end = iv.start + span;
+}
+function ivTime(x) { const W = $("isig").clientWidth - IGUT; return iv.start + ((x - IGUT) / W) * (iv.end - iv.start); }
+function lowerBound(arr, t, key) { let lo = 0, hi = arr.length; while (lo < hi) { const m = (lo + hi) >> 1; if (key(arr[m]) < t) lo = m + 1; else hi = m; } return lo; }
+function inspectFieldAt(x, y) {
+  if (x < IGUT || y < IRULER) return null;
+  const row = Math.floor((y - IRULER) / IROW), t = ivTime(x), nl = iv.ins.lines.length;
+  const list = row < nl ? iv.byLine[iv.ins.lines[row][0]] : iv.byRow[iv.ann[row - nl]];
+  if (!list) return null;
+  const i = lowerBound(list, t, (f) => f[1]);
+  const f = list[i];
+  return f && f[0] <= t && t < f[1] ? f : null;
+}
+function showField(f) {
+  const sr = st.samplerate, where = typeof f[2] === "number" ? (iv.ins.lines.find((l) => l[0] === f[2]) || [0, "D" + f[2]])[1] + " bit" : f[2];
+  $("iinfo").innerHTML = `<b>${esc(f[3])}</b>  ${esc(where)} · ${(f[0] >= iv.s ? "+" : "") + fmtTime((f[0] - iv.s) / sr)} · ${fmtTime((f[1] - f[0]) / sr)}` + (f[4] ? `\n${esc(f[4])}` : "");
+}
+function drawInspect() {
+  const c = $("isig"); if (!c || !iv) return;
+  const dpr = devicePixelRatio || 1, W = c.clientWidth, H = c.clientHeight;
+  if (c.width !== Math.round(W * dpr) || c.height !== Math.round(H * dpr)) { c.width = Math.round(W * dpr); c.height = Math.round(H * dpr); }
+  const g = c.getContext("2d");
+  g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, W, H);
+  const PW = W - IGUT, span = iv.end - iv.start, sr = st.samplerate;
+  const xOf = (t) => IGUT + ((t - iv.start) / span) * PW;
+  g.textBaseline = "middle";
+  // The event itself.
+  const ex1 = Math.max(IGUT, xOf(iv.s)), ex2 = Math.min(W, xOf(iv.e));
+  if (ex2 > ex1) { g.fillStyle = "rgba(106,168,255,.07)"; g.fillRect(ex1, IRULER, ex2 - ex1, H - IRULER); }
+  // Ruler, relative to the event start.
+  const secs = span / sr, raw = secs / 8, p10 = Math.pow(10, Math.floor(Math.log10(raw)));
+  const step = [1, 2, 5, 10].map((k) => k * p10).find((v) => v >= raw) * sr;
+  g.font = "10px ui-sans-serif, system-ui"; g.fillStyle = "#8a93a5";
+  for (let t = Math.ceil((iv.start - iv.s) / step) * step + iv.s; t < iv.end; t += step) {
+    const x = xOf(t); g.fillRect(x, IRULER - 5, 1, 5);
+    g.fillText((t >= iv.s ? "+" : "") + fmtTime((t - iv.s) / sr), x + 3, IRULER / 2 - 1);
+  }
+  g.fillStyle = "#232a38"; g.fillRect(IGUT, IRULER - 0.5, PW, 1);
+  const nl = iv.ins.lines.length;
+  iv.ins.lines.forEach(([ch, role, init, edges, cut], i) => {
+    const top = IRULER + i * IROW, yH = top + 14, yL = top + IROW - 4;
+    g.fillStyle = "#e8eefc"; g.font = "600 12px ui-sans-serif, system-ui"; g.fillText(role, 8, top + IROW / 2);
+    const name = (st.chans && st.chans[ch] && st.chans[ch].name) || "";
+    g.fillStyle = "#8a93a5"; g.font = "10px ui-sans-serif, system-ui";
+    g.fillText(`ch${ch}${name && name !== role ? " " + name : ""}`.slice(0, 13), 52, top + IROW / 2);
+    g.fillStyle = "#1a1f2a"; g.fillRect(0, top + IROW - 0.5, W, 1);
+    g.save(); g.beginPath(); g.rect(IGUT, top, PW, IROW); g.clip();
+    // Waveform: the level after k changes is init ^ (k & 1).
+    const k0 = lowerBound(edges, iv.start, (x) => x);
+    let lvl = init ^ (k0 & 1);
+    g.strokeStyle = "#7ee3a3"; g.lineWidth = 1.2; g.beginPath(); g.moveTo(IGUT, lvl ? yH : yL);
+    for (let k = k0; k < edges.length && edges[k] < iv.end; k++) {
+      const x = xOf(edges[k]); g.lineTo(x, lvl ? yH : yL); lvl ^= 1; g.lineTo(x, lvl ? yH : yL);
+    }
+    g.lineTo(W, lvl ? yH : yL); g.stroke();
+    // Bit values at their sampling points, when there is room.
+    const bits = iv.byLine[ch] || [];
+    if (bits.length && ((bits[0][1] - bits[0][0]) / span) * PW >= 7) {
+      g.font = "10px ui-monospace, Menlo, monospace";
+      for (let j = lowerBound(bits, iv.start, (f) => f[1]); j < bits.length && bits[j][0] < iv.end; j++) {
+        const f = bits[j], x1 = xOf(f[0]), x2 = xOf(f[1]);
+        if (x2 - x1 >= 14) { g.fillStyle = "rgba(255,255,255,.05)"; g.fillRect(x1, top + 1, 1, IROW - 3); }
+        g.fillStyle = f === iv.hover ? "#ffd27a" : "#9fb7d9"; g.fillText(f[3], (x1 + x2) / 2 - 3, top + 6);
+      }
+    }
+    g.restore();
+    if (cut) { g.fillStyle = "#f0b45a"; g.fillText("(truncated)", W - 70, top + 6); }
+  });
+  iv.ann.forEach((r, j) => {
+    const top = IRULER + (nl + j) * IROW, h = IROW - 8;
+    g.fillStyle = "#8a93a5"; g.font = "italic 11px ui-sans-serif, system-ui"; g.fillText(r, 8, top + IROW / 2);
+    g.save(); g.beginPath(); g.rect(IGUT, top, PW, IROW); g.clip();
+    g.font = "11px ui-monospace, Menlo, monospace";
+    const list = iv.byRow[r];
+    for (let k = lowerBound(list, iv.start, (f) => f[1]); k < list.length && list[k][0] < iv.end; k++) {
+      const f = list[k], x1 = xOf(f[0]), x2 = Math.max(xOf(f[1]), x1 + 1), y = top + 4;
+      g.fillStyle = f[5] ? "rgba(255,107,107,.28)" : f === iv.hover ? "rgba(255,210,122,.30)" : "rgba(106,168,255,.18)";
+      g.fillRect(x1 + 0.5, y, x2 - x1 - 1, h);
+      g.fillStyle = f[5] ? "#ff6b6b" : "rgba(106,168,255,.8)"; g.fillRect(x1, y, 1, h);
+      if (x2 - x1 > 12) {
+        g.save(); g.beginPath(); g.rect(x1, y, x2 - x1 - 2, h); g.clip();
+        g.fillStyle = "#e8eefc"; g.fillText(f[3], Math.max(x1, IGUT) + 4, y + h / 2); g.restore();
+      }
+    }
+    g.restore();
+  });
 }
 
 // ------------------------------------------------------------ requests
@@ -739,7 +907,7 @@ function shortSrc(src) { const w = src.split(" "); return w[1] && /^ch\d+$/.test
 $("events").addEventListener("click", (e) => {
   const d = e.target.closest("div[data-s]"); if (!d) return;
   const s = +d.dataset.s, en = +d.dataset.e;
-  openEvent(s, +d.dataset.c);
+  openEvent(s, +d.dataset.c, en);
   // Bring it into view too (without zooming out of what's shown).
   if (s < view.start || s > view.end) centerOn((s + en) / 2);
 });

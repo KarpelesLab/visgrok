@@ -58,9 +58,14 @@ visgrok web --dir ~/captures boot.sr   # open a capture right away
 From the browser: record (SLogic or demo source; channels, rate, threshold),
 assign channel names and roles (UART, SPI/SSD1306, I2C, SD card), browse any
 part of a live or recorded capture (wheel to zoom, drag to pan, minimap,
-`End` to follow live, `[` `]` to jump between decoded events) and click
-decoded events to jump to them. The view position is kept in the URL, so
-links point at a moment in a capture.
+`End` to follow live, `[` `]` to jump between decoded events). Hovering a
+decoded event shows its full description; clicking it opens the event in
+detail: the lines it was decoded from with the value of every bit, the
+fields those bits form and what each value means (SD command index,
+argument, CRC7/CRC16, data bytes; UART start/data/parity/stop bits; ATR and
+PPS bytes; SPI words; I2C address/ACK), a hexdump of its payload and the
+events around it. The view position is kept in the URL, so links point at
+a moment in a capture.
 
 Channel names, roles (buses), decoder settings, bookmarks (`b`) and notes
 are saved in a sidecar next to the capture (`capture.vgk.json`, see

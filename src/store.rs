@@ -367,6 +367,37 @@ impl SampleStore {
         Ok((first, out))
     }
 
+    /// The channels in `mask` over samples `start..end` (clamped to what
+    /// exists) as a [`Signal`](crate::inspect::Signal).
+    pub fn signal(&self, start: u64, end: u64, mask: Sample) -> io::Result<crate::inspect::Signal> {
+        const STEP: u64 = 1 << 20;
+        let mask = mask & self.mask;
+        let unit = self.unit;
+        let mut sig = crate::inspect::Signal::new(start, 0);
+        let mut first = true;
+        let mut at = start;
+        while at < end {
+            let (got, data) = self.read(at, end.min(at + STEP))?;
+            if data.is_empty() {
+                break;
+            }
+            for (i, b) in data.chunks_exact(unit).enumerate() {
+                let mut v = [0u8; 4];
+                v[..unit].copy_from_slice(b);
+                let s = Sample::from_le_bytes(v) & mask;
+                if first {
+                    sig = crate::inspect::Signal::new(got, s);
+                    first = false;
+                } else {
+                    sig.push(got + i as u64, s);
+                }
+            }
+            at = got + (data.len() / unit) as u64;
+        }
+        sig.end = at.max(sig.start);
+        Ok(sig)
+    }
+
     fn chunk_data(&self, c: ChunkRef) -> io::Result<Arc<Vec<u8>>> {
         if let Some((_, d)) = self.cache.lock().unwrap().iter().find(|(o, _)| *o == c.offset) {
             return Ok(d.clone());
@@ -505,13 +536,36 @@ impl SampleStore {
             .collect()
     }
 
-    /// The event starting at `start` on `channel` (the first one, if several),
-    /// with up to `context` events of the same decoder before and after it.
-    pub fn event_with_context(&self, start: u64, channel: u8, context: usize) -> Option<(StoredEvent, Vec<StoredEvent>, Vec<StoredEvent>)> {
+    /// The latest event of `source` starting before `before` whose text
+    /// satisfies `pred` (looking back through at most `limit` events).
+    pub fn last_event(&self, before: u64, source: &str, limit: usize, pred: impl Fn(&str) -> bool) -> Option<StoredEvent> {
+        let ev = self.events.read().unwrap();
+        let i = ev.partition_point(|e| e.start < before);
+        ev[..i]
+            .iter()
+            .rev()
+            .take(limit)
+            .find(|e| &*e.source == source && pred(&e.text))
+            .cloned()
+    }
+
+    /// The event starting at `start` on `channel` (and ending at `end`, if
+    /// given; otherwise the first one), with up to `context` events of the
+    /// same decoder before and after it.
+    pub fn event_with_context(
+        &self,
+        start: u64,
+        channel: u8,
+        end: Option<u64>,
+        context: usize,
+    ) -> Option<(StoredEvent, Vec<StoredEvent>, Vec<StoredEvent>)> {
         let ev = self.events.read().unwrap();
         // Same near-sorted lookup as `events`.
         let from = ev.partition_point(|e| e.end < start.saturating_sub(1 << 20));
-        let i = from + ev[from..].iter().position(|e| e.start == start && e.channel == channel)?;
+        let i = from
+            + ev[from..]
+                .iter()
+                .position(|e| e.start == start && e.channel == channel && end.is_none_or(|x| e.end == x))?;
         let e = ev[i].clone();
         let mut before: Vec<StoredEvent> = ev[..i]
             .iter()
