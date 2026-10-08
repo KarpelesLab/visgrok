@@ -84,14 +84,23 @@ impl Ssd1306 {
     }
 
     fn note(out: &mut Vec<Annotation>, start: u64, end: u64, text: String) {
-        out.push(Annotation { start, end, event: Event::Protocol { proto: PROTO, text } });
+        out.push(Annotation {
+            start,
+            end,
+            event: Event::Protocol { proto: PROTO, text },
+        });
     }
 
     fn flush_run(&mut self, out: &mut Vec<Annotation>) {
         if let Some((start, n, page, col, end)) = self.run.take() {
             self.updates += 1;
             let mode = ["horizontal", "vertical", "page"][self.mode.min(2) as usize];
-            Self::note(out, start, end, format!("write {n} bytes at page {page} col {col} ({mode} addressing)"));
+            Self::note(
+                out,
+                start,
+                end,
+                format!("write {n} bytes at page {page} col {col} ({mode} addressing)"),
+            );
         }
     }
 
@@ -285,7 +294,11 @@ impl Decoder for Ssd1306 {
         for a in &events {
             match a.event {
                 Event::SpiWord { mosi: Some(w), dc, .. } => {
-                    let (dc, b) = if self.three_wire { (w >> 8 & 1 != 0, w as u8) } else { (dc.unwrap_or(true), w as u8) };
+                    let (dc, b) = if self.three_wire {
+                        (w >> 8 & 1 != 0, w as u8)
+                    } else {
+                        (dc.unwrap_or(true), w as u8)
+                    };
                     self.byte(b, dc, a.start, a.end, out);
                 }
                 Event::SpiSelect(false) => self.flush_run(out),
@@ -310,7 +323,14 @@ impl Decoder for Ssd1306 {
                 pixels[sy * self.width + x] = on ^ self.inverted;
             }
         }
-        Some(DisplayView { title: PROTO, width: self.width, height: self.height, pixels, on: self.on, updates: self.updates })
+        Some(DisplayView {
+            title: PROTO,
+            width: self.width,
+            height: self.height,
+            pixels,
+            on: self.on,
+            updates: self.updates,
+        })
     }
 }
 
@@ -323,7 +343,13 @@ mod tests {
     fn init_sequence_and_framebuffer() {
         let mut bus = Bus::new(false);
         // Typical init: display off, clock, mux, horizontal mode, remaps, columns, pages, on.
-        bus.send(&[0xae, 0xd5, 0x80, 0xa8, 0x3f, 0x20, 0x00, 0xa1, 0xc8, 0x21, 0x00, 0x7f, 0x22, 0x00, 0x07, 0xaf], false, true);
+        bus.send(
+            &[
+                0xae, 0xd5, 0x80, 0xa8, 0x3f, 0x20, 0x00, 0xa1, 0xc8, 0x21, 0x00, 0x7f, 0x22, 0x00, 0x07, 0xaf,
+            ],
+            false,
+            true,
+        );
         // Fill: first column all on, then 127 zero columns, then page 1 starts with 0x01.
         let mut frame = vec![0u8; 128 * 8];
         frame[0] = 0xff;

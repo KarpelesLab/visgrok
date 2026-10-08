@@ -31,7 +31,17 @@ pub struct SpiConfig {
 impl SpiConfig {
     /// Automatic mode, 8-bit MSB-first words.
     pub fn new(clk: u8, mosi: Option<u8>, miso: Option<u8>, cs: Option<u8>) -> SpiConfig {
-        SpiConfig { clk, mosi, miso, cs, dc: None, cs_active_high: false, mode: None, word_bits: 8, lsb_first: false }
+        SpiConfig {
+            clk,
+            mosi,
+            miso,
+            cs,
+            dc: None,
+            cs_active_high: false,
+            mode: None,
+            word_bits: 8,
+            lsb_first: false,
+        }
     }
 }
 
@@ -135,7 +145,11 @@ impl Decoder for Spi {
             if sel && self.cfg.mode.is_none() {
                 self.cpol = t.now >> self.cfg.clk & 1 != 0;
             }
-            out.push(Annotation { start: t.at, end: t.at, event: Event::SpiSelect(sel) });
+            out.push(Annotation {
+                start: t.at,
+                end: t.at,
+                event: Event::SpiSelect(sel),
+            });
         }
         let clk = t.now >> self.cfg.clk & 1 != 0;
         if clk == self.clk {
@@ -209,12 +223,21 @@ pub(crate) mod tests {
     impl Bus {
         pub(crate) fn new(cpol: bool) -> Bus {
             let idle_clk = cpol as u32;
-            Bus { st: 0b100 | idle_clk, at: 0, tr: Vec::new(), idle_clk }
+            Bus {
+                st: 0b100 | idle_clk,
+                at: 0,
+                tr: Vec::new(),
+                idle_clk,
+            }
         }
         pub(crate) fn set(&mut self, v: u32) {
             self.at += 10;
             if v != self.st {
-                self.tr.push(Transition { at: self.at, prev: self.st, now: v });
+                self.tr.push(Transition {
+                    at: self.at,
+                    prev: self.st,
+                    now: v,
+                });
                 self.st = v;
             }
         }
@@ -260,11 +283,23 @@ pub(crate) mod tests {
             ev,
             vec![
                 Event::SpiSelect(true),
-                Event::SpiWord { mosi: Some(0xae), miso: None, dc: Some(false) },
-                Event::SpiWord { mosi: Some(0x20), miso: None, dc: Some(false) },
+                Event::SpiWord {
+                    mosi: Some(0xae),
+                    miso: None,
+                    dc: Some(false)
+                },
+                Event::SpiWord {
+                    mosi: Some(0x20),
+                    miso: None,
+                    dc: Some(false)
+                },
                 Event::SpiSelect(false),
                 Event::SpiSelect(true),
-                Event::SpiWord { mosi: Some(0xa5), miso: None, dc: Some(true) },
+                Event::SpiWord {
+                    mosi: Some(0xa5),
+                    miso: None,
+                    dc: Some(true)
+                },
                 Event::SpiSelect(false),
             ]
         );

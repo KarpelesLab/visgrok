@@ -1,9 +1,9 @@
 //! Decodes one channel of a .vgk capture as UART.
 //! Usage: vgk_uart FILE CHANNEL [FORMAT e.g. 8N1/8E2] [FROM_S] [TO_S]
+use visgrok::EdgeDetector;
 use visgrok::decode::uart::{Parity, Uart, UartConfig};
 use visgrok::decode::{Decoder, Event};
 use visgrok::vgk::VgkReader;
-use visgrok::EdgeDetector;
 
 fn main() -> std::io::Result<()> {
     let a: Vec<String> = std::env::args().collect();
@@ -49,7 +49,11 @@ fn main() -> std::io::Result<()> {
     for a in &out {
         let t = a.start as f64 / sr as f64;
         match &a.event {
-            Event::UartByte { value, framing_error, parity_error } => println!(
+            Event::UartByte {
+                value,
+                framing_error,
+                parity_error,
+            } => println!(
                 "{t:.6}s {value:02x}{}{}",
                 if *framing_error { " FRAMING" } else { "" },
                 if *parity_error { " PARITY" } else { "" }

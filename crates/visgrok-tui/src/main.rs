@@ -10,11 +10,11 @@ use std::time::Duration;
 use clap::Parser;
 use visgrok::Source;
 use visgrok::analyzer::{DecoderOptions, SpiProtocol, parse_uart_format};
+use visgrok::formats::{Format, ReadOptions, WriteOptions};
 use visgrok::roles::{Role, fmt_hz};
 use visgrok::slogic::{Config, Pattern, SLogic};
-use visgrok::synth::Synth;
-use visgrok::formats::{Format, ReadOptions, WriteOptions};
 use visgrok::srzip::SrCompression;
+use visgrok::synth::Synth;
 
 use crate::pipeline::{Pipeline, Setup};
 
@@ -141,7 +141,11 @@ fn parse_rate(s: &str) -> Result<u64, String> {
 fn open_source(args: &Args) -> Result<Box<dyn Source>, String> {
     let limit = |rate: u64| args.duration.map(|d| (d * rate as f64) as u64);
     if let Some(p) = &args.input {
-        let ropts = ReadOptions { samplerate: args.samplerate, channels: Some(args.channels), format: None };
+        let ropts = ReadOptions {
+            samplerate: args.samplerate,
+            channels: Some(args.channels),
+            format: None,
+        };
         let r = visgrok::formats::open(p, &ropts).map_err(|e| format!("{}: {e}", p.display()))?;
         return Ok(r);
     }
@@ -181,7 +185,16 @@ fn open_source(args: &Args) -> Result<Box<dyn Source>, String> {
 
 fn main() {
     let args = Args::parse();
-    if let Some(Command::Convert { input, output, samplerate, channels, sr_store, from, to }) = &args.command {
+    if let Some(Command::Convert {
+        input,
+        output,
+        samplerate,
+        channels,
+        sr_store,
+        from,
+        to,
+    }) = &args.command
+    {
         let fmt = |s: &Option<String>| -> Option<Format> {
             s.as_deref().map(|n| {
                 Format::parse(n).unwrap_or_else(|| {
@@ -190,7 +203,11 @@ fn main() {
                 })
             })
         };
-        let ropts = ReadOptions { samplerate: *samplerate, channels: *channels, format: fmt(from) };
+        let ropts = ReadOptions {
+            samplerate: *samplerate,
+            channels: *channels,
+            format: fmt(from),
+        };
         let wopts = WriteOptions {
             sr_compression: if *sr_store { SrCompression::Store } else { SrCompression::Deflate },
             format: fmt(to),
@@ -262,7 +279,10 @@ fn main() {
             .split_once('=')
             .ok_or_else(|| format!("--role {spec:?}: expected CH=ROLE"))
             .and_then(|(ch, r)| {
-                let ch: usize = ch.trim_start_matches(['D', 'd']).parse().map_err(|_| format!("bad channel in {spec:?}"))?;
+                let ch: usize = ch
+                    .trim_start_matches(['D', 'd'])
+                    .parse()
+                    .map_err(|_| format!("bad channel in {spec:?}"))?;
                 Ok((ch, Role::parse(r)?))
             });
         match parsed {
@@ -306,7 +326,13 @@ fn main() {
         }
         names[ch] = Some(name.to_string());
     }
-    let setup = Setup { extra, roles, options, names, lossless_analysis: args.input.is_some() };
+    let setup = Setup {
+        extra,
+        roles,
+        options,
+        names,
+        lossless_analysis: args.input.is_some(),
+    };
     let pipe = match Pipeline::start(source, args.output.clone(), setup) {
         Ok(p) => p,
         Err(e) => {
@@ -314,7 +340,11 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let result = if args.headless { headless(&pipe, args.auto) } else { ui::run(&pipe, args.auto) };
+    let result = if args.headless {
+        headless(&pipe, args.auto)
+    } else {
+        ui::run(&pipe, args.auto)
+    };
     pipe.stop();
     let summary = pipe.join();
     if let Err(e) = result {
@@ -420,21 +450,34 @@ fn info(path: &std::path::Path) -> std::io::Result<()> {
         bucket *= k as u64;
     }
     println!();
-    println!("{:<8} {:>5} {:>12} {:>14} {:>7} {:>11}  first/last edge", "channel", "start", "edges", "frequency", "duty", "min pulse");
+    println!(
+        "{:<8} {:>5} {:>12} {:>14} {:>7} {:>11}  first/last edge",
+        "channel", "start", "edges", "frequency", "duty", "min pulse"
+    );
     for (i, c) in stats.channels.iter().enumerate() {
         let name = m.name(i);
         let start = first_state.map_or("-", |s| if s >> i & 1 != 0 { "HIGH" } else { "low" });
         let freq = c.median_period().map(|p| fmt_hz(sr / p as f64)).unwrap_or_default();
         let duty = c.duty().map(|d| format!("{:.1}%", d * 100.0)).unwrap_or_default();
-        let minp = Some(c.min_high.min(c.min_low)).filter(|&v| v != u64::MAX).map(|v| format!("{:.0} ns", v as f64 / sr * 1e9)).unwrap_or_default();
+        let minp = Some(c.min_high.min(c.min_low))
+            .filter(|&v| v != u64::MAX)
+            .map(|v| format!("{:.0} ns", v as f64 / sr * 1e9))
+            .unwrap_or_default();
         let span = match (buckets.iter().position(|b| b[i] > 0), buckets.iter().rposition(|b| b[i] > 0)) {
-            (Some(a), Some(z)) => format!("{:.1}s .. {:.1}s", (a as u64 * bucket) as f64 / sr, ((z as u64 + 1) * bucket) as f64 / sr),
+            (Some(a), Some(z)) => format!(
+                "{:.1}s .. {:.1}s",
+                (a as u64 * bucket) as f64 / sr,
+                ((z as u64 + 1) * bucket) as f64 / sr
+            ),
             _ => "-".into(),
         };
         println!("{name:<8} {start:>5} {:>12} {freq:>14} {duty:>7} {minp:>11}  {span}", c.edges());
     }
     println!();
-    println!("activity ({:.2} s per column; ' ' none, ░▒▓█ increasing edge rate):", bucket as f64 / sr);
+    println!(
+        "activity ({:.2} s per column; ' ' none, ░▒▓█ increasing edge rate):",
+        bucket as f64 / sr
+    );
     for i in 0..n {
         let name = m.name(i);
         let max = buckets.iter().map(|b| b[i]).max().unwrap_or(0);

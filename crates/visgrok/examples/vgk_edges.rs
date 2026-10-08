@@ -47,7 +47,12 @@ fn main() -> std::io::Result<()> {
                 let dt = (t.at - last[ch]) as f64 / sr;
                 last[ch] = t.at;
                 let dir = if t.now >> ch & 1 != 0 { "rise" } else { "fall" };
-                println!("{:14.9}s {:<6} {dir}  (+{:.3} us since previous edge)", t.at as f64 / sr, names[ch], dt * 1e6);
+                println!(
+                    "{:14.9}s {:<6} {dir}  (+{:.3} us since previous edge)",
+                    t.at as f64 / sr,
+                    names[ch],
+                    dt * 1e6
+                );
                 shown += 1;
             }
             if shown >= max {

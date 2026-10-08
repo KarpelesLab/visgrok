@@ -15,8 +15,14 @@ fn invalid(msg: impl Into<String>) -> io::Error {
 }
 
 /// VCD time units, in femtoseconds.
-const UNITS: [(&str, u128); 6] =
-    [("s", 1_000_000_000_000_000), ("ms", 1_000_000_000_000), ("us", 1_000_000_000), ("ns", 1_000_000), ("ps", 1_000), ("fs", 1)];
+const UNITS: [(&str, u128); 6] = [
+    ("s", 1_000_000_000_000_000),
+    ("ms", 1_000_000_000_000),
+    ("us", 1_000_000_000),
+    ("ns", 1_000_000),
+    ("ps", 1_000),
+    ("fs", 1),
+];
 
 /// Identifier for channel `i` (printable ASCII, as VCD wants).
 fn ident(i: usize) -> String {
@@ -59,7 +65,11 @@ impl<W: Write> VcdWriter<W> {
         let step = period_fs / unit_fs;
         let mut h = String::new();
         h += "$version visgrok $end\n";
-        h += &format!("$comment device={} samplerate={} $end\n", info.device.replace('$', ""), info.samplerate);
+        h += &format!(
+            "$comment device={} samplerate={} $end\n",
+            info.device.replace('$', ""),
+            info.samplerate
+        );
         h += &format!("$timescale 1 {unit} $end\n");
         h += "$scope module logic $end\n";
         for i in 0..info.channels {
@@ -181,7 +191,13 @@ fn parse_header(lines: &mut io::Lines<BufReader<File>>) -> io::Result<Header> {
             break;
         }
     }
-    let mut h = Header { unit_fs: 1_000_000, ids: Vec::new(), names: Vec::new(), rate: None, device: None };
+    let mut h = Header {
+        unit_fs: 1_000_000,
+        ids: Vec::new(),
+        names: Vec::new(),
+        rate: None,
+        device: None,
+    };
     let toks: Vec<&str> = text.split_whitespace().collect();
     let mut i = 0;
     while i < toks.len() {
@@ -196,7 +212,11 @@ fn parse_header(lines: &mut io::Lines<BufReader<File>>) -> io::Result<Header> {
                 let digits: String = spec.chars().take_while(|c| c.is_ascii_digit()).collect();
                 let unit = &spec[digits.len()..];
                 let mult: u128 = digits.parse().unwrap_or(1);
-                let u = UNITS.iter().find(|(n, _)| *n == unit).map(|u| u.1).ok_or_else(|| invalid(format!("bad timescale {spec:?}")))?;
+                let u = UNITS
+                    .iter()
+                    .find(|(n, _)| *n == unit)
+                    .map(|u| u.1)
+                    .ok_or_else(|| invalid(format!("bad timescale {spec:?}")))?;
                 h.unit_fs = mult * u;
             }
             "$var" => {

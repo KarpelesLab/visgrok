@@ -58,7 +58,16 @@ pub struct UartConfig {
 impl UartConfig {
     /// 8N1 at a fixed `baud`.
     pub fn new(channel: u8, baud: u32) -> UartConfig {
-        UartConfig { channel, baud: Some(baud), auto: false, data_bits: 8, parity: Parity::None, inverted: false, stop_bits: 1, auto_format: false }
+        UartConfig {
+            channel,
+            baud: Some(baud),
+            auto: false,
+            data_bits: 8,
+            parity: Parity::None,
+            inverted: false,
+            stop_bits: 1,
+            auto_format: false,
+        }
     }
 
     /// 8N1 with automatic, adaptive baud rate detection.
@@ -149,7 +158,15 @@ impl Uart {
         // = 250 ns), well above typical probe glitches.
         let glitch = (samplerate as f64 * 25e-9) as u64;
         let format_known = !cfg.auto_format;
-        Uart { cfg, samplerate, bit, edges: VecDeque::new(), glitch, format_known, announced: None }
+        Uart {
+            cfg,
+            samplerate,
+            bit,
+            edges: VecDeque::new(),
+            glitch,
+            format_known,
+            announced: None,
+        }
     }
 
     /// Current baud rate estimate.
@@ -271,7 +288,13 @@ impl Uart {
             min_width = Some(min_width.map_or(w, |m: u64| m.min(w)));
             prev = at;
         }
-        Frame { value, framing_error, parity_error, min_width, end }
+        Frame {
+            value,
+            framing_error,
+            parity_error,
+            min_width,
+            end,
+        }
     }
 
     fn set_bit(&mut self, bit: f64, at: u64, out: &mut Vec<Annotation>) {
@@ -286,7 +309,11 @@ impl Uart {
         let new = nice_baud(b);
         if self.announced != Some(new) {
             self.announced = Some(new);
-            out.push(Annotation { start: at, end: at, event: Event::UartBaud { baud: new } });
+            out.push(Annotation {
+                start: at,
+                end: at,
+                event: Event::UartBaud { baud: new },
+            });
         }
     }
 
@@ -354,10 +381,17 @@ impl Uart {
             })
         };
         let enough = frames.len() >= 4;
-        let candidates = [(8, Parity::Even), (8, Parity::Odd), (8, Parity::None), (7, Parity::Even), (7, Parity::Odd)];
-        let found = candidates.iter().copied().find(|&(d, p)| {
-            fits(d, p) && (p == Parity::None || enough || !fits(8, Parity::None))
-        });
+        let candidates = [
+            (8, Parity::Even),
+            (8, Parity::Odd),
+            (8, Parity::None),
+            (7, Parity::Even),
+            (7, Parity::Odd),
+        ];
+        let found = candidates
+            .iter()
+            .copied()
+            .find(|&(d, p)| fits(d, p) && (p == Parity::None || enough || !fits(8, Parity::None)));
         match found {
             Some((d, p)) => {
                 let used = 1 + d as u32 + (p != Parity::None) as u32;
@@ -435,7 +469,11 @@ impl Uart {
                         self.cfg.stop_bits = 1;
                         self.format_known = true;
                         self.announce(t0, out);
-                        out.push(Annotation { start: t0, end: t0, event: Event::UartFormat { format: label } });
+                        out.push(Annotation {
+                            start: t0,
+                            end: t0,
+                            event: Event::UartFormat { format: label },
+                        });
                     }
                 }
             }
@@ -451,7 +489,10 @@ impl Uart {
                 let too_slow = f.framing_error && f.min_width.is_none_or(|w| w as f64 > 1.5 * bit);
                 if too_fast || too_slow {
                     let settled = self.settled(now);
-                    match self.estimate(0, false).or_else(|| if settled { self.estimate(0, true) } else { None }) {
+                    match self
+                        .estimate(0, false)
+                        .or_else(|| if settled { self.estimate(0, true) } else { None })
+                    {
                         Some(nb) if (nb / bit - 1.0).abs() > 0.2 => {
                             self.set_bit(nb, t0, out);
                             continue; // decode this frame again at the new rate
@@ -465,9 +506,17 @@ impl Uart {
             let event = if f.framing_error && f.value == 0 {
                 Event::UartBreak
             } else {
-                Event::UartByte { value: f.value, framing_error: f.framing_error, parity_error: f.parity_error }
+                Event::UartByte {
+                    value: f.value,
+                    framing_error: f.framing_error,
+                    parity_error: f.parity_error,
+                }
             };
-            out.push(Annotation { start: t0, end: f.end, event });
+            out.push(Annotation {
+                start: t0,
+                end: f.end,
+                event,
+            });
             while self.edges.front().is_some_and(|e| e.0 < stop_mid) {
                 self.edges.pop_front();
             }
@@ -537,7 +586,11 @@ mod tests {
         for (i, &l) in levels.iter().enumerate() {
             if l != cur {
                 let at = start + (i as f64 * bit) as u64;
-                out.push(Transition { at, prev: cur as u32, now: l as u32 });
+                out.push(Transition {
+                    at,
+                    prev: cur as u32,
+                    now: l as u32,
+                });
                 cur = l;
             }
         }
@@ -547,7 +600,11 @@ mod tests {
     fn bytes_of(out: &[Annotation]) -> Vec<u8> {
         out.iter()
             .filter_map(|a| match a.event {
-                Event::UartByte { value, framing_error: false, .. } => Some(value as u8),
+                Event::UartByte {
+                    value,
+                    framing_error: false,
+                    ..
+                } => Some(value as u8),
                 _ => None,
             })
             .collect()
@@ -578,7 +635,11 @@ mod tests {
         d.advance(end + 100_000, &mut out);
         assert_eq!(bytes_of(&out), b"\x55AT+SPEED?\r\n");
         assert!(out.iter().any(|a| a.event == Event::UartBaud { baud: 21_500 }), "{out:?}");
-        assert!(out.iter().any(|a| a.event == Event::UartFormat { format: "8N2".into() } || a.event == Event::UartFormat { format: "8N1".into() }), "{out:?}");
+        assert!(
+            out.iter()
+                .any(|a| a.event == Event::UartFormat { format: "8N2".into() } || a.event == Event::UartFormat { format: "8N1".into() }),
+            "{out:?}"
+        );
     }
 
     #[test]
@@ -595,7 +656,11 @@ mod tests {
             x ^= x >> 17;
             x ^= x << 5;
             at += 1 + (x % 1700) as u64;
-            tr.push(Transition { at, prev: level, now: level ^ 1 });
+            tr.push(Transition {
+                at,
+                prev: level,
+                now: level ^ 1,
+            });
             level ^= 1;
         }
         if level == 0 {
@@ -615,7 +680,11 @@ mod tests {
         let mut cur = true;
         for (i, &l) in levels.iter().enumerate() {
             if l != cur {
-                tr.push(Transition { at: start + (i as f64 * bit) as u64, prev: cur as u32, now: l as u32 });
+                tr.push(Transition {
+                    at: start + (i as f64 * bit) as u64,
+                    prev: cur as u32,
+                    now: l as u32,
+                });
                 cur = l;
             }
         }
@@ -631,7 +700,11 @@ mod tests {
             .iter()
             .filter(|a| a.start >= start)
             .filter_map(|a| match a.event {
-                Event::UartByte { value, framing_error: false, parity_error: false } => Some(value as u8),
+                Event::UartByte {
+                    value,
+                    framing_error: false,
+                    parity_error: false,
+                } => Some(value as u8),
                 _ => None,
             })
             .collect();
@@ -667,7 +740,11 @@ mod tests {
         let mut cur = true;
         for (i, &l) in levels.iter().enumerate() {
             if l != cur {
-                tr.push(Transition { at: (i as f64 * bit) as u64, prev: cur as u32, now: l as u32 });
+                tr.push(Transition {
+                    at: (i as f64 * bit) as u64,
+                    prev: cur as u32,
+                    now: l as u32,
+                });
                 cur = l;
             }
         }
@@ -680,7 +757,17 @@ mod tests {
             d.transition(t, &mut out);
         }
         d.advance(100_000, &mut out);
-        assert!(matches!(out[0].event, Event::UartByte { value: 0x55, framing_error: true, parity_error: false }), "{out:?}");
+        assert!(
+            matches!(
+                out[0].event,
+                Event::UartByte {
+                    value: 0x55,
+                    framing_error: true,
+                    parity_error: false
+                }
+            ),
+            "{out:?}"
+        );
     }
 
     #[test]

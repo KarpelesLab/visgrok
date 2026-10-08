@@ -58,11 +58,19 @@ impl Decoder for I2c {
         if sda_changed && !scl_changed && scl {
             // SDA moving while SCL is high: START (falling) or STOP (rising).
             if !sda {
-                out.push(Annotation { start: t.at, end: t.at, event: Event::I2cStart });
+                out.push(Annotation {
+                    start: t.at,
+                    end: t.at,
+                    event: Event::I2cStart,
+                });
                 self.active = true;
                 self.expect_addr = true;
             } else {
-                out.push(Annotation { start: t.at, end: t.at, event: Event::I2cStop });
+                out.push(Annotation {
+                    start: t.at,
+                    end: t.at,
+                    event: Event::I2cStop,
+                });
                 self.active = false;
             }
             self.bits = 0;
@@ -79,11 +87,19 @@ impl Decoder for I2c {
                 let byte = (self.bits >> 1) as u8;
                 let event = if self.expect_addr {
                     self.expect_addr = false;
-                    Event::I2cAddress { addr: byte >> 1, read: byte & 1 != 0, ack }
+                    Event::I2cAddress {
+                        addr: byte >> 1,
+                        read: byte & 1 != 0,
+                        ack,
+                    }
                 } else {
                     Event::I2cData { value: byte, ack }
                 };
-                out.push(Annotation { start: self.byte_start, end: t.at, event });
+                out.push(Annotation {
+                    start: self.byte_start,
+                    end: t.at,
+                    event,
+                });
                 self.bits = 0;
                 self.nbits = 0;
             }
@@ -105,7 +121,11 @@ mod tests {
         let mut set = |st: &mut u32, at: &mut u64, v: u32| {
             *at += 10;
             if v != *st {
-                out.push(Transition { at: *at, prev: *st, now: v });
+                out.push(Transition {
+                    at: *at,
+                    prev: *st,
+                    now: v,
+                });
                 *st = v;
             }
         };
@@ -141,7 +161,11 @@ mod tests {
             ev,
             vec![
                 Event::I2cStart,
-                Event::I2cAddress { addr: 0x50, read: false, ack: true },
+                Event::I2cAddress {
+                    addr: 0x50,
+                    read: false,
+                    ack: true
+                },
                 Event::I2cData { value: 0x12, ack: true },
                 Event::I2cData { value: 0xab, ack: true },
                 Event::I2cStop,

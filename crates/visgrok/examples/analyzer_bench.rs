@@ -14,8 +14,20 @@ fn main() {
     let data: Vec<u8> = (0..n).map(|i| ((i as f64 / per) as u64 & 1) as u8).collect();
     let mut a = Analyzer::new(8, sr);
     a.set_ignored(ignore);
-    let roles = vec![Role::Unknown, Role::Unknown, Role::Uart { baud: 0 }, Role::SpiClk, Role::SpiDc, Role::SpiCs, Role::SpiMosi, Role::Unknown];
-    let opts = DecoderOptions { spi_protocol: SpiProtocol::Ssd1306 { width: 128, height: 64 }, ..Default::default() };
+    let roles = vec![
+        Role::Unknown,
+        Role::Unknown,
+        Role::Uart { baud: 0 },
+        Role::SpiClk,
+        Role::SpiDc,
+        Role::SpiCs,
+        Role::SpiMosi,
+        Role::Unknown,
+    ];
+    let opts = DecoderOptions {
+        spi_protocol: SpiProtocol::Ssd1306 { width: 128, height: 64 },
+        ..Default::default()
+    };
     let d = a.decoders_for_roles(&roles, &opts);
     a.set_decoders(d);
     let t = Instant::now();
@@ -23,5 +35,9 @@ fn main() {
         a.process(&Block::new((i << 18) as u64, 1, c.to_vec()));
     }
     let dt = t.elapsed().as_secs_f64();
-    println!("1 s of 8ch @ {} MHz analyzed in {dt:.3} s ({:.0} MS/s)", sr / 1_000_000, n as f64 / dt / 1e6);
+    println!(
+        "1 s of 8ch @ {} MHz analyzed in {dt:.3} s ({:.0} MS/s)",
+        sr / 1_000_000,
+        n as f64 / dt / 1e6
+    );
 }

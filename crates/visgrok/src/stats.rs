@@ -171,7 +171,11 @@ pub struct Stats {
 impl Stats {
     /// Creates statistics for `n` channels.
     pub fn new(n: usize) -> Stats {
-        Stats { channels: vec![ChannelStats::default(); n], samples: 0, initialized: false }
+        Stats {
+            channels: vec![ChannelStats::default(); n],
+            samples: 0,
+            initialized: false,
+        }
     }
 
     /// Sets the initial state of all channels (the first sample of the capture).
@@ -222,7 +226,11 @@ mod tests {
         let mut lvl = 0u32;
         for i in 1..=100u64 {
             let now = lvl ^ 1;
-            tr.push(Transition { at: i * 10, prev: lvl, now });
+            tr.push(Transition {
+                at: i * 10,
+                prev: lvl,
+                now,
+            });
             lvl = now;
         }
         s.process(&tr);

@@ -71,7 +71,11 @@ impl Block {
     pub fn slice(&self, from: usize, to: usize) -> Block {
         let to = to.min(self.len());
         let from = from.min(to);
-        Block::new(self.start + from as u64, self.unit_size, self.data[from * self.unit_size..to * self.unit_size].to_vec())
+        Block::new(
+            self.start + from as u64,
+            self.unit_size,
+            self.data[from * self.unit_size..to * self.unit_size].to_vec(),
+        )
     }
 
     /// Iterates over all samples as channel bitmasks.

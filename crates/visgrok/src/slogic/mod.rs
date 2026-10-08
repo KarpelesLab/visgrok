@@ -111,8 +111,11 @@ impl Model {
             // base / (divm1 + 1), divm1 0..=255; keep integer-Hz rates. The
             // 16U3 has one 800 MHz base; the 32U3 has 1400 and 800 MHz.
             Model::SLogic16U3 | Model::SLogic32U3 => {
-                let bases: &[u64] =
-                    if self == Model::SLogic32U3 { &[1_400_000_000, 800_000_000] } else { &[800_000_000] };
+                let bases: &[u64] = if self == Model::SLogic32U3 {
+                    &[1_400_000_000, 800_000_000]
+                } else {
+                    &[800_000_000]
+                };
                 let mut v: Vec<u64> = bases
                     .iter()
                     .flat_map(|&b| (1..=256u64).filter(move |n| b % n == 0).map(move |n| b / n))
@@ -334,9 +337,7 @@ impl SLogic {
         let dev = ctx
             .devices()?
             .into_iter()
-            .find(|d| {
-                found(d).is_some_and(|f| !f.bootloader && serial.is_none_or(|s| f.serial.as_deref() == Some(s)))
-            })
+            .find(|d| found(d).is_some_and(|f| !f.bootloader && serial.is_none_or(|s| f.serial.as_deref() == Some(s))))
             .ok_or(Error::NotFound)?;
         let model = Model::from_pid(dev.product_id()).ok_or(Error::NotFound)?;
         let serial = dev.serial_number().map(str::to_string);
@@ -347,7 +348,12 @@ impl SLogic {
         }
         handle.set_auto_detach_kernel_driver(true);
         handle.claim_interface(0)?;
-        let s = SLogic { _ctx: ctx, handle, model, serial };
+        let s = SLogic {
+            _ctx: ctx,
+            handle,
+            model,
+            serial,
+        };
         if model.is_u3() {
             // A previous session may have left the device in reset, in which
             // state the AUX mailbox does not answer.
@@ -441,9 +447,7 @@ impl SLogic {
         if words == 0 {
             return Err(Error::Protocol(format!("AUX {sel}: empty payload")));
         }
-        let read = |s: &SLogic| -> Result<Vec<u32>> {
-            (0..words).map(|i| s.reg_read(reg::AUX_DATA + 4 * i as u16)).collect()
-        };
+        let read = |s: &SLogic| -> Result<Vec<u32>> { (0..words).map(|i| s.reg_read(reg::AUX_DATA + 4 * i as u16)).collect() };
         let mut payload = read(self)?;
         f(&mut payload)?;
         for (i, w) in payload.iter().enumerate() {

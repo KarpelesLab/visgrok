@@ -100,13 +100,7 @@ impl SrZipWriter<BufWriter<File>> {
 impl<W: Write> SrZipWriter<W> {
     /// Starts a session on `out`. `chunk_size` is rounded down to a multiple of
     /// `unit_size`.
-    pub fn new(
-        out: W,
-        channels: &[String],
-        samplerate: u64,
-        unit_size: usize,
-        chunk_size: usize,
-    ) -> io::Result<SrZipWriter<W>> {
+    pub fn new(out: W, channels: &[String], samplerate: u64, unit_size: usize, chunk_size: usize) -> io::Result<SrZipWriter<W>> {
         let chunk_size = (chunk_size / unit_size).max(1) * unit_size;
         let mut w = SrZipWriter {
             out,
@@ -122,7 +116,11 @@ impl<W: Write> SrZipWriter<W> {
         };
         w.entry("version", b"2")?;
         let mut meta = String::from("[global]\nsigrok version=0.5.2\n\n[device 1]\ncapturefile=logic-1\n");
-        meta += &format!("total probes={}\nsamplerate={}\ntotal analog=0\n", channels.len(), samplerate_string(samplerate));
+        meta += &format!(
+            "total probes={}\nsamplerate={}\ntotal analog=0\n",
+            channels.len(),
+            samplerate_string(samplerate)
+        );
         for (i, name) in channels.iter().enumerate() {
             meta += &format!("probe{}={}\n", i + 1, name);
         }
@@ -224,7 +222,14 @@ impl<W: Write> SrZipWriter<W> {
         h.extend_from_slice(name.as_bytes());
         self.put(&h)?;
         self.put(payload)?;
-        self.entries.push(Entry { name: name.to_string(), crc, method, raw, stored: payload.len() as u64, offset });
+        self.entries.push(Entry {
+            name: name.to_string(),
+            crc,
+            method,
+            raw,
+            stored: payload.len() as u64,
+            offset,
+        });
         Ok(())
     }
 
@@ -300,7 +305,6 @@ impl<W: Write> SrZipWriter<W> {
         Ok(self.out)
     }
 }
-
 
 /// Formats a sample rate the way sigrok does (`"24 MHz"`, `"1500 kHz"`).
 pub fn samplerate_string(hz: u64) -> String {

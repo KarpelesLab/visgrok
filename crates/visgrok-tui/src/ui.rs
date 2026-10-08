@@ -13,9 +13,9 @@ use visgrok::analyzer::{Analyzer, SpiProtocol};
 use visgrok::decode::DisplayView;
 use visgrok::roles::{BAUD_RATES, Role, Suggestion, fmt_hz};
 
-use crate::pipeline::{Pipeline, format_annotation};
 #[cfg(test)]
 use crate::pipeline::Setup;
+use crate::pipeline::{Pipeline, format_annotation};
 
 /// UI state that is not part of the pipeline.
 struct Ui {
@@ -79,7 +79,13 @@ const PICKS: &[&str] = &[
 ];
 
 fn pick_role(i: usize, ch: usize, roles: &[Option<Role>]) -> Option<Role> {
-    let find = |f: &dyn Fn(&Role) -> bool| roles.iter().enumerate().find(|(j, r)| *j != ch && r.as_ref().is_some_and(f)).map(|(j, _)| j);
+    let find = |f: &dyn Fn(&Role) -> bool| {
+        roles
+            .iter()
+            .enumerate()
+            .find(|(j, r)| *j != ch && r.as_ref().is_some_and(f))
+            .map(|(j, _)| j)
+    };
     match i {
         1 => Some(Role::Uart { baud: 0 }),
         2 => Some(Role::SpiClk),
@@ -159,7 +165,12 @@ fn snapshot(a: &Analyzer, window: u64) -> Snapshot {
             .collect(),
         suggestions: a.suggest(),
         wave,
-        log: a.annotations.iter().skip(skip).map(|t| format_annotation(t, &names, a.samplerate())).collect(),
+        log: a
+            .annotations
+            .iter()
+            .skip(skip)
+            .map(|t| format_annotation(t, &names, a.samplerate()))
+            .collect(),
         gaps: a.gaps,
         display: a.decoders().iter().find_map(|d| d.display()),
     }
@@ -277,7 +288,11 @@ fn event_loop(term: &mut DefaultTerminal, pipe: &Pipeline, auto: bool) -> io::Re
             KeyCode::Up | KeyCode::Char('k') => ui.table.select(Some(row.saturating_sub(1))),
             KeyCode::Char('v') => {
                 ui.show_all = !ui.show_all;
-                ui.flash(if ui.show_all { "showing all channels" } else { "showing active/assigned channels" });
+                ui.flash(if ui.show_all {
+                    "showing all channels"
+                } else {
+                    "showing active/assigned channels"
+                });
             }
             KeyCode::Char('+') | KeyCode::Char('=') => ui.zoom = (ui.zoom / 2).max(16),
             KeyCode::Char('-') => ui.zoom = (ui.zoom * 2).min(pipe.info.samplerate * 10),
@@ -304,17 +319,19 @@ fn event_loop(term: &mut DefaultTerminal, pipe: &Pipeline, auto: bool) -> io::Re
                 // UART; pressing again cycles through standard baud rates.
                 let cur = pipe.roles.lock().unwrap()[sel].clone();
                 let baud = match cur {
-                    Some(Role::Uart { baud }) => {
-                        match BAUD_RATES.iter().position(|&b| b == baud) {
-                            Some(i) if i + 1 < BAUD_RATES.len() => BAUD_RATES[i + 1],
-                            Some(_) => 0,
-                            None => BAUD_RATES[0],
-                        }
-                    }
+                    Some(Role::Uart { baud }) => match BAUD_RATES.iter().position(|&b| b == baud) {
+                        Some(i) if i + 1 < BAUD_RATES.len() => BAUD_RATES[i + 1],
+                        Some(_) => 0,
+                        None => BAUD_RATES[0],
+                    },
                     _ => 0,
                 };
                 set_role(pipe, sel, Some(Role::Uart { baud }));
-                ui.flash(&if baud == 0 { format!("ch{sel}: UART auto baud") } else { format!("ch{sel}: UART starting at {baud}") });
+                ui.flash(&if baud == 0 {
+                    format!("ch{sel}: UART auto baud")
+                } else {
+                    format!("ch{sel}: UART starting at {baud}")
+                });
             }
             KeyCode::Char('i') if sel + 1 < n => {
                 {
@@ -379,8 +396,14 @@ fn draw(f: &mut Frame, pipe: &Pipeline, ui: &mut Ui, snap: &Snapshot) {
         .rev()
         .map(|l| Line::raw(l.as_str()))
         .collect();
-    let title = format!(" Decoded ({} decoders) ", pipe.analyzer.lock().map(|a| a.decoders().len()).unwrap_or(0));
-    f.render_widget(Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(title)), log);
+    let title = format!(
+        " Decoded ({} decoders) ",
+        pipe.analyzer.lock().map(|a| a.decoders().len()).unwrap_or(0)
+    );
+    f.render_widget(
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(title)),
+        log,
+    );
 
     let mut help_spans = vec![Span::styled(
         " q quit  ↑↓ select  ⏎ set role  a auto-assign all  A accept  u UART  i I2C  x clear  p SPI proto  m SPI mode  v all ch  +/- zoom  space pause  r reset",
@@ -398,10 +421,19 @@ fn draw(f: &mut Frame, pipe: &Pipeline, ui: &mut Ui, snap: &Snapshot) {
         let area = f.area();
         let w = 46.min(area.width);
         let h = (PICKS.len() as u16 + 2).min(area.height);
-        let r = Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h };
+        let r = Rect {
+            x: area.x + (area.width - w) / 2,
+            y: area.y + (area.height - h) / 2,
+            width: w,
+            height: h,
+        };
         let items: Vec<ListItem> = PICKS.iter().map(|s| ListItem::new(*s)).collect();
         let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title(format!(" Role for {} (D{sel}) ", pipe.names[sel])))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!(" Role for {} (D{sel}) ", pipe.names[sel])),
+            )
             .highlight_style(Style::default().bg(Color::Blue).add_modifier(Modifier::BOLD));
         f.render_widget(Clear, r);
         f.render_stateful_widget(list, r, p);
@@ -410,7 +442,14 @@ fn draw(f: &mut Frame, pipe: &Pipeline, ui: &mut Ui, snap: &Snapshot) {
 
 /// Renders a reconstructed display with braille dots (2×4 pixels per cell).
 fn draw_display(f: &mut Frame, area: Rect, d: &DisplayView) {
-    let title = format!(" {} {}×{} {} · {} updates ", d.title, d.width, d.height, if d.on { "on" } else { "off" }, d.updates);
+    let title = format!(
+        " {} {}×{} {} · {} updates ",
+        d.title,
+        d.width,
+        d.height,
+        if d.on { "on" } else { "off" },
+        d.updates
+    );
     let block = Block::default().borders(Borders::ALL).title(title);
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -469,7 +508,10 @@ fn draw_header(f: &mut Frame, area: Rect, pipe: &Pipeline, ui: &Ui, snap: &Snaps
             Style::default().fg(Color::Magenta),
         ));
     }
-    f.render_widget(Paragraph::new(Line::from(status)).block(Block::default().borders(Borders::ALL)), area);
+    f.render_widget(
+        Paragraph::new(Line::from(status)).block(Block::default().borders(Borders::ALL)),
+        area,
+    );
 }
 
 fn draw_channels(f: &mut Frame, area: Rect, pipe: &Pipeline, ui: &mut Ui, snap: &Snapshot, vis: &[usize]) {
@@ -556,7 +598,11 @@ fn draw_wave(f: &mut Frame, area: Rect, pipe: &Pipeline, ui: &Ui, snap: &Snapsho
         let mut level = if idx > 0 {
             snap.wave[idx - 1].now & bit != 0
         } else {
-            snap.wave.first().map(|t| t.prev & bit != 0).or(snap.state.map(|s| s & bit != 0)).unwrap_or(false)
+            snap.wave
+                .first()
+                .map(|t| t.prev & bit != 0)
+                .or(snap.state.map(|s| s & bit != 0))
+                .unwrap_or(false)
         };
         let mut s = String::with_capacity(cols as usize * 3);
         for col in 0..cols {
@@ -578,9 +624,16 @@ fn draw_wave(f: &mut Frame, area: Rect, pipe: &Pipeline, ui: &Ui, snap: &Snapsho
                 _ => '█',
             });
         }
-        let color = if snap.channels.get(ch).is_some_and(|c| c.edges > 0) { Color::Green } else { Color::DarkGray };
+        let color = if snap.channels.get(ch).is_some_and(|c| c.edges > 0) {
+            Color::Green
+        } else {
+            Color::DarkGray
+        };
         lines.push(Line::from(vec![
-            Span::styled(format!("{:<w$}", pipe.names[ch], w = label_w as usize), Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("{:<w$}", pipe.names[ch], w = label_w as usize),
+                Style::default().fg(Color::Gray),
+            ),
             Span::styled(s, Style::default().fg(color)),
         ]));
     }
@@ -683,11 +736,18 @@ mod tests {
         roles[26] = Some(Role::SpiMosi);
         roles[27] = Some(Role::SpiDc);
         roles[28] = Some(Role::SpiCs);
-        let opts = DecoderOptions { spi_protocol: SpiProtocol::Ssd1306 { width: 128, height: 64 }, ..Default::default() };
+        let opts = DecoderOptions {
+            spi_protocol: SpiProtocol::Ssd1306 { width: 128, height: 64 },
+            ..Default::default()
+        };
         let pipe = Pipeline::start(
             Box::new(High(Synth::device(50_000_000, Some(15_000_000)))),
             None,
-            Setup { roles, options: opts, ..Default::default() },
+            Setup {
+                roles,
+                options: opts,
+                ..Default::default()
+            },
         )
         .unwrap();
         while !pipe.finished() {
@@ -729,13 +789,27 @@ mod tests {
     #[test]
     fn renders_device_demo_with_oled() {
         use visgrok::analyzer::{DecoderOptions, SpiProtocol};
-        let roles = vec![Some(Role::Uart { baud: 0 }), Some(Role::SpiClk), Some(Role::SpiMosi), Some(Role::SpiDc), Some(Role::SpiCs)];
-        let opts = DecoderOptions { spi_protocol: SpiProtocol::Ssd1306 { width: 128, height: 64 }, ..Default::default() };
+        let roles = vec![
+            Some(Role::Uart { baud: 0 }),
+            Some(Role::SpiClk),
+            Some(Role::SpiMosi),
+            Some(Role::SpiDc),
+            Some(Role::SpiCs),
+        ];
+        let opts = DecoderOptions {
+            spi_protocol: SpiProtocol::Ssd1306 { width: 128, height: 64 },
+            ..Default::default()
+        };
         let pipe = Pipeline::start(
             Box::new(Synth::device(50_000_000, Some(15_000_000))),
             None,
-            Setup { roles, options: opts, ..Default::default() },
-        ).unwrap();
+            Setup {
+                roles,
+                options: opts,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         while !pipe.finished() {
             std::thread::sleep(Duration::from_millis(50));
         }

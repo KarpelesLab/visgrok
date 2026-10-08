@@ -19,9 +19,7 @@ pub struct OrderedPool<T: Send + 'static, R: Send + 'static> {
 impl<T: Send + 'static, R: Send + 'static> OrderedPool<T, R> {
     /// Starts `threads` workers (default: a share of the CPUs) running `f`.
     pub fn new(threads: Option<usize>, f: impl Fn(T) -> R + Send + Sync + 'static) -> Self {
-        let threads = threads.unwrap_or_else(|| {
-            std::thread::available_parallelism().map_or(2, |n| n.get().saturating_sub(4).clamp(1, 6))
-        });
+        let threads = threads.unwrap_or_else(|| std::thread::available_parallelism().map_or(2, |n| n.get().saturating_sub(4).clamp(1, 6)));
         let (jtx, jrx) = channel::<(u64, T)>();
         let jrx = Arc::new(Mutex::new(jrx));
         let (dtx, drx) = channel();
@@ -40,7 +38,14 @@ impl<T: Send + 'static, R: Send + 'static> OrderedPool<T, R> {
                 })
             })
             .collect();
-        OrderedPool { jobs: Some(jtx), done: drx, workers, next_seq: 0, next_out: 0, ready: BTreeMap::new() }
+        OrderedPool {
+            jobs: Some(jtx),
+            done: drx,
+            workers,
+            next_seq: 0,
+            next_out: 0,
+            ready: BTreeMap::new(),
+        }
     }
 
     /// Items submitted but not yet returned.
@@ -69,7 +74,11 @@ impl<T: Send + 'static, R: Send + 'static> OrderedPool<T, R> {
             if self.next_out == self.next_seq {
                 return None;
             }
-            let got = if block { self.done.recv().ok()? } else { self.done.try_recv().ok()? };
+            let got = if block {
+                self.done.recv().ok()?
+            } else {
+                self.done.try_recv().ok()?
+            };
             self.ready.insert(got.0, got.1);
         }
     }

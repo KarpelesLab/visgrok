@@ -99,7 +99,13 @@ fn central_directory(f: &mut File) -> io::Result<Vec<ZipEntry>> {
             }
             e += 4 + size;
         }
-        out.push(ZipEntry { name, method, stored, raw, offset });
+        out.push(ZipEntry {
+            name,
+            method,
+            stored,
+            raw,
+            offset,
+        });
         p = end + comment_len;
     }
     Ok(out)
@@ -151,7 +157,10 @@ impl SrReader {
     pub fn open(path: impl AsRef<Path>) -> io::Result<SrReader> {
         let mut file = File::open(path)?;
         let entries = central_directory(&mut file)?;
-        let meta_entry = entries.iter().find(|e| e.name == "metadata").ok_or_else(|| invalid("no metadata in .sr"))?;
+        let meta_entry = entries
+            .iter()
+            .find(|e| e.name == "metadata")
+            .ok_or_else(|| invalid("no metadata in .sr"))?;
         let meta = String::from_utf8_lossy(&read_entry(&mut file, meta_entry)?).into_owned();
         let mut capturefile = "logic-1".to_string();
         let (mut channels, mut rate, mut unit) = (0usize, 0u64, 0usize);
@@ -215,7 +224,13 @@ impl SrReader {
         }
         Ok(SrReader {
             file,
-            info: CaptureInfo { device: "sigrok session".into(), channels, samplerate: rate, unit_size: unit, names: n },
+            info: CaptureInfo {
+                device: "sigrok session".into(),
+                channels,
+                samplerate: rate,
+                unit_size: unit,
+                names: n,
+            },
             chunks,
             next: 0,
             pos: 0,

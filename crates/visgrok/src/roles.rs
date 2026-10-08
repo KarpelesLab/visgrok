@@ -108,8 +108,8 @@ pub struct Suggestion {
 
 /// Standard UART baud rates used to snap detected rates.
 pub const BAUD_RATES: &[u32] = &[
-    300, 600, 1200, 2400, 4800, 9600, 14400, 19200, 28800, 38400, 57600, 74880, 115200, 230400, 250000, 460800,
-    500000, 921600, 1000000, 1500000, 2000000, 3000000, 4000000,
+    300, 600, 1200, 2400, 4800, 9600, 14400, 19200, 28800, 38400, 57600, 74880, 115200, 230400, 250000, 460800, 500000, 921600, 1000000,
+    1500000, 2000000, 3000000, 4000000,
 ];
 
 /// Cross-channel event counters used to detect buses.
@@ -131,7 +131,14 @@ impl Correlator {
     /// Creates counters for `n` channels.
     pub fn new(n: usize) -> Correlator {
         let z = vec![0; n * n];
-        Correlator { n, state: 0, hi: z.clone(), lo: z.clone(), start: z.clone(), stop: z }
+        Correlator {
+            n,
+            state: 0,
+            hi: z.clone(),
+            lo: z.clone(),
+            start: z.clone(),
+            stop: z,
+        }
     }
 
     /// Sets the initial line state.
@@ -217,30 +224,49 @@ fn uart_score(c: &ChannelStats, samplerate: u64) -> Option<Suggestion> {
     // Refine the bit time using all pulses that are clean multiples.
     let (sum, bits) = w.iter().fold((0.0, 0.0), |(s, b), &x| {
         let r = (x as f64 / unit).round();
-        if (1.0..=10.0).contains(&r) && (x as f64 / unit - r).abs() < 0.2 { (s + x as f64, b + r) } else { (s, b) }
+        if (1.0..=10.0).contains(&r) && (x as f64 / unit - r).abs() < 0.2 {
+            (s + x as f64, b + r)
+        } else {
+            (s, b)
+        }
     });
     let measured = samplerate as f64 * bits / sum;
     let baud = snap_baud(measured).unwrap_or_else(|| crate::decode::uart::nice_baud(measured));
-    (fit > 0.85).then_some(Suggestion { role: Role::Uart { baud }, confidence: fit * 0.9 })
+    (fit > 0.85).then_some(Suggestion {
+        role: Role::Uart { baud },
+        confidence: fit * 0.9,
+    })
 }
 
 /// Proposes a role for each channel.
 pub fn detect(stats: &Stats, corr: &Correlator, samplerate: u64) -> Vec<Suggestion> {
     let n = stats.channels.len();
-    let mut out: Vec<Suggestion> = vec![Suggestion { role: Role::Unknown, confidence: 0.0 }; n];
+    let mut out: Vec<Suggestion> = vec![
+        Suggestion {
+            role: Role::Unknown,
+            confidence: 0.0
+        };
+        n
+    ];
     let active: Vec<bool> = stats.channels.iter().map(|c| c.edges() >= 4).collect();
 
     // Free-running clocks.
     for (i, c) in stats.channels.iter().enumerate() {
         if !active[i] {
-            out[i] = Suggestion { role: Role::Idle, confidence: if c.edges() == 0 { 0.9 } else { 0.5 } };
+            out[i] = Suggestion {
+                role: Role::Idle,
+                confidence: if c.edges() == 0 { 0.9 } else { 0.5 },
+            };
             continue;
         }
         if let (Some(p), Some(j), Some(d)) = (c.median_period(), c.period_jitter(), c.duty()) {
             let recent = c.last_edge.is_some_and(|e| stats.samples.saturating_sub(e) < 4 * p);
             if j < 0.05 && (0.2..0.8).contains(&d) && recent {
                 let hz = samplerate as f64 / p as f64;
-                out[i] = Suggestion { role: Role::Clock { hz }, confidence: 0.95 - j * 4.0 };
+                out[i] = Suggestion {
+                    role: Role::Clock { hz },
+                    confidence: 0.95 - j * 4.0,
+                };
             }
         }
     }
@@ -282,8 +308,14 @@ pub fn detect(stats: &Stats, corr: &Correlator, samplerate: u64) -> Vec<Suggesti
         }
         used[scl] = true;
         used[sda] = true;
-        out[scl] = Suggestion { role: Role::I2cScl { sda: sda as u8 }, confidence: ratio * 0.9 };
-        out[sda] = Suggestion { role: Role::I2cSda { scl: scl as u8 }, confidence: ratio * 0.9 };
+        out[scl] = Suggestion {
+            role: Role::I2cScl { sda: sda as u8 },
+            confidence: ratio * 0.9,
+        };
+        out[sda] = Suggestion {
+            role: Role::I2cSda { scl: scl as u8 },
+            confidence: ratio * 0.9,
+        };
     }
 
     // UART lines.
@@ -323,7 +355,10 @@ pub fn detect(stats: &Stats, corr: &Correlator, samplerate: u64) -> Vec<Suggesti
             continue;
         }
         used[clk] = true;
-        out[clk] = Suggestion { role: Role::SpiClk, confidence: 0.6 };
+        out[clk] = Suggestion {
+            role: Role::SpiClk,
+            confidence: 0.6,
+        };
         for d in data {
             used[d] = true;
             // CS toggles rarely compared to data.
@@ -337,7 +372,10 @@ pub fn detect(stats: &Stats, corr: &Correlator, samplerate: u64) -> Vec<Suggesti
 
     for (i, s) in out.iter_mut().enumerate() {
         if s.role == Role::Unknown && active[i] {
-            *s = Suggestion { role: Role::Data, confidence: 0.3 };
+            *s = Suggestion {
+                role: Role::Data,
+                confidence: 0.3,
+            };
         }
     }
     out
@@ -353,10 +391,14 @@ impl Role {
             None => (s, None),
         };
         let num = |a: Option<&str>| -> Result<u32, String> {
-            a.ok_or_else(|| format!("{name} needs an argument"))?.parse().map_err(|_| format!("bad number in {s:?}"))
+            a.ok_or_else(|| format!("{name} needs an argument"))?
+                .parse()
+                .map_err(|_| format!("bad number in {s:?}"))
         };
         Ok(match name.to_ascii_lowercase().as_str() {
-            "uart" | "serial" => Role::Uart { baud: if arg.is_some() { num(arg)? } else { 0 } },
+            "uart" | "serial" => Role::Uart {
+                baud: if arg.is_some() { num(arg)? } else { 0 },
+            },
             "spi-clk" | "spi-sclk" | "sclk" | "sck" => Role::SpiClk,
             "spi-mosi" | "spi-di" | "mosi" | "sdi" => Role::SpiMosi,
             "spi-miso" | "spi-do" | "miso" | "sdo" => Role::SpiMiso,

@@ -197,7 +197,12 @@ impl Capture {
                 return Err(e.into());
             }
         }
-        self.verify = verify.then(|| Verify { first: None, last: Instant::now(), bytes: 0, held: Vec::new() });
+        self.verify = verify.then(|| Verify {
+            first: None,
+            last: Instant::now(),
+            bytes: 0,
+            held: Vec::new(),
+        });
         self.last_data = Instant::now();
         if let Err(e) = self.dev.run(&self.cfg) {
             self.halt_ring();
@@ -210,7 +215,11 @@ impl Capture {
     fn drain_endpoint(&self) {
         let mut buf = vec![0u8; 64 << 10];
         for _ in 0..32 {
-            match self.dev.handle().bulk_read(self.dev.model().endpoint(), &mut buf, Duration::from_millis(50)) {
+            match self
+                .dev
+                .handle()
+                .bulk_read(self.dev.model().endpoint(), &mut buf, Duration::from_millis(50))
+            {
                 Ok(n) if n > 0 => continue,
                 _ => break,
             }
@@ -369,8 +378,7 @@ fn callback(tx: Sender<Completion>, shared: Arc<Shared>, size: usize) -> impl Fn
         data.truncate(n);
         let at = Instant::now();
         let mut resubmitted = false;
-        if !shared.stopping.load(Ordering::SeqCst) && matches!(status, TransferStatus::Completed | TransferStatus::TimedOut)
-        {
+        if !shared.stopping.load(Ordering::SeqCst) && matches!(status, TransferStatus::Completed | TransferStatus::TimedOut) {
             resubmitted = t.set_buffer(shared.buffer(size)).is_ok() && t.submit().is_ok();
             if !resubmitted {
                 let mut e = shared.error.lock().unwrap();

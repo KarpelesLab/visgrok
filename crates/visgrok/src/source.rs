@@ -22,7 +22,11 @@ pub struct CaptureInfo {
 impl CaptureInfo {
     /// Name of channel `i`.
     pub fn name(&self, i: usize) -> String {
-        self.names.get(i).filter(|n| !n.is_empty()).cloned().unwrap_or_else(|| format!("D{i}"))
+        self.names
+            .get(i)
+            .filter(|n| !n.is_empty())
+            .cloned()
+            .unwrap_or_else(|| format!("D{i}"))
     }
 
     /// All channel names.

@@ -92,7 +92,11 @@ impl EdgeDetector {
             while i < end {
                 let v = block.sample(i) & mask;
                 if v != prev {
-                    out.push(Transition { at: block.start + i as u64, prev, now: v });
+                    out.push(Transition {
+                        at: block.start + i as u64,
+                        prev,
+                        now: v,
+                    });
                     prev = v;
                     wprev = splat(prev);
                 }
@@ -135,7 +139,14 @@ mod tests {
         let data: Vec<u8> = s.iter().flat_map(|v| v.to_le_bytes()).collect();
         d.process(&Block::new(100, 2, data), &mut out);
         assert_eq!(out.len(), 2);
-        assert_eq!(out[0], Transition { at: 113, prev: 0x8000, now: 0x8001 });
+        assert_eq!(
+            out[0],
+            Transition {
+                at: 113,
+                prev: 0x8000,
+                now: 0x8001
+            }
+        );
         assert_eq!(out[1].at, 114);
     }
 
@@ -152,9 +163,21 @@ mod tests {
         assert_eq!(
             out,
             vec![
-                Transition { at: 9, prev: 0x8000_0000, now: 0x8001_0000 },
-                Transition { at: 11, prev: 0x8001_0000, now: 0x8000_0000 },
-                Transition { at: 22, prev: 0x8000_0000, now: 0 },
+                Transition {
+                    at: 9,
+                    prev: 0x8000_0000,
+                    now: 0x8001_0000
+                },
+                Transition {
+                    at: 11,
+                    prev: 0x8001_0000,
+                    now: 0x8000_0000
+                },
+                Transition {
+                    at: 22,
+                    prev: 0x8000_0000,
+                    now: 0
+                },
             ]
         );
     }
@@ -164,6 +187,9 @@ mod tests {
         let mut d = EdgeDetector::new(0x01);
         let mut out = Vec::new();
         d.process(&Block::new(0, 1, vec![0, 2, 2, 3, 2]), &mut out);
-        assert_eq!(out, vec![Transition { at: 3, prev: 0, now: 1 }, Transition { at: 4, prev: 1, now: 0 }]);
+        assert_eq!(
+            out,
+            vec![Transition { at: 3, prev: 0, now: 1 }, Transition { at: 4, prev: 1, now: 0 }]
+        );
     }
 }

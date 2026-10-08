@@ -86,7 +86,10 @@ pub fn open(path: &Path, opts: &ReadOptions) -> io::Result<Box<dyn Source>> {
         Format::Vcd => Ok(Box::new(vcd::VcdReader::open(path, opts.samplerate)?)),
         Format::Bin => {
             let (Some(samplerate), Some(channels)) = (opts.samplerate, opts.channels) else {
-                return Err(io::Error::new(io::ErrorKind::InvalidInput, "raw .bin input needs a sample rate and a channel count"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "raw .bin input needs a sample rate and a channel count",
+                ));
             };
             Ok(Box::new(BinReader::open(path, samplerate, channels)?))
         }
@@ -106,7 +109,11 @@ pub struct WriteOptions {
 
 impl Default for WriteOptions {
     fn default() -> Self {
-        WriteOptions { sr_compression: SrCompression::Store, extra: Vec::new(), format: None }
+        WriteOptions {
+            sr_compression: SrCompression::Store,
+            extra: Vec::new(),
+            format: None,
+        }
     }
 }
 
@@ -264,7 +271,10 @@ pub fn create(path: &Path, info: &CaptureInfo, opts: &WriteOptions) -> io::Resul
             opts.sr_compression,
         )?),
         Format::Vcd => Box::new(vcd::VcdWriter::create(path, info)?),
-        Format::Bin => Box::new(BinWriter { out: BufWriter::with_capacity(1 << 20, File::create(path)?), n: 0 }),
+        Format::Bin => Box::new(BinWriter {
+            out: BufWriter::with_capacity(1 << 20, File::create(path)?),
+            n: 0,
+        }),
     })
 }
 
@@ -358,11 +368,24 @@ mod tests {
     #[test]
     fn roundtrip_every_format() {
         let (info, data) = sample_data();
-        for (ext, comp) in [("vgk", SrCompression::Store), ("sr", SrCompression::Store), ("sr", SrCompression::Deflate), ("vcd", SrCompression::Store), ("bin", SrCompression::Store)] {
+        for (ext, comp) in [
+            ("vgk", SrCompression::Store),
+            ("sr", SrCompression::Store),
+            ("sr", SrCompression::Deflate),
+            ("vcd", SrCompression::Store),
+            ("bin", SrCompression::Store),
+        ] {
             let path = scratch(&format!("rt-{ext}-{comp:?}.{ext}"));
-            let wopts = WriteOptions { sr_compression: comp, ..Default::default() };
+            let wopts = WriteOptions {
+                sr_compression: comp,
+                ..Default::default()
+            };
             write_all(&path, &info, &data, &wopts);
-            let ropts = ReadOptions { samplerate: Some(info.samplerate), channels: Some(info.channels), format: None };
+            let ropts = ReadOptions {
+                samplerate: Some(info.samplerate),
+                channels: Some(info.channels),
+                format: None,
+            };
             let (rinfo, back) = read_all(&path, &ropts);
             assert_eq!(rinfo.samplerate, info.samplerate, "{ext}");
             assert_eq!(rinfo.channels, info.channels, "{ext}");
@@ -384,11 +407,18 @@ mod tests {
         let c = scratch("chain.vcd");
         let d = scratch("chain.bin");
         let e = scratch("chain2.vgk");
-        let deflate = WriteOptions { sr_compression: SrCompression::Deflate, ..Default::default() };
+        let deflate = WriteOptions {
+            sr_compression: SrCompression::Deflate,
+            ..Default::default()
+        };
         convert(&a, &b, &ReadOptions::default(), &deflate, |_| {}).unwrap();
         convert(&b, &c, &ReadOptions::default(), &WriteOptions::default(), |_| {}).unwrap();
         convert(&c, &d, &ReadOptions::default(), &WriteOptions::default(), |_| {}).unwrap();
-        let raw = ReadOptions { samplerate: Some(info.samplerate), channels: Some(info.channels), format: None };
+        let raw = ReadOptions {
+            samplerate: Some(info.samplerate),
+            channels: Some(info.channels),
+            format: None,
+        };
         let r = convert(&d, &e, &raw, &WriteOptions::default(), |_| {}).unwrap();
         assert_eq!(r.samples, 300_000);
         let (_, back) = read_all(&e, &ReadOptions::default());

@@ -16,8 +16,8 @@ use std::time::Instant;
 
 use visgrok::analyzer::{Analyzer, DecoderOptions, Tagged};
 use visgrok::decode::Event;
-use visgrok::roles::Role;
 use visgrok::formats::{SampleWriter, WriteOptions};
+use visgrok::roles::Role;
 use visgrok::{Block, CaptureInfo, Source};
 
 /// What to start a pipeline with besides the source and output.
@@ -64,13 +64,15 @@ impl Pipeline {
     /// The output format follows the extension: `.sr` writes a sigrok
     /// session, anything else the compressed visgrok format. `extra` is
     /// recorded in the visgrok file's metadata.
-    pub fn start(
-        source: Box<dyn Source>,
-        output: Option<PathBuf>,
-        setup: Setup,
-    ) -> Result<Arc<Pipeline>, String> {
+    pub fn start(source: Box<dyn Source>, output: Option<PathBuf>, setup: Setup) -> Result<Arc<Pipeline>, String> {
         let info = source.info();
-        let Setup { extra, mut roles, options, names, lossless_analysis } = setup;
+        let Setup {
+            extra,
+            mut roles,
+            options,
+            names,
+            lossless_analysis,
+        } = setup;
         roles.resize(info.channels, None);
         let names: Vec<String> = (0..info.channels)
             .map(|i| names.get(i).cloned().flatten().unwrap_or_else(|| format!("D{i}")))
@@ -123,13 +125,7 @@ impl Pipeline {
         self.stop.store(true, Ordering::SeqCst);
     }
 
-    fn acquire(
-        &self,
-        mut source: Box<dyn Source>,
-        wtx: Option<SyncSender<Arc<Block>>>,
-        atx: SyncSender<Arc<Block>>,
-        lossless: bool,
-    ) {
+    fn acquire(&self, mut source: Box<dyn Source>, wtx: Option<SyncSender<Arc<Block>>>, atx: SyncSender<Arc<Block>>, lossless: bool) {
         let mut stopping = false;
         loop {
             if !stopping && self.stop.load(Ordering::SeqCst) {
@@ -268,7 +264,12 @@ impl Pipeline {
 
     /// Effective role per channel: the user assignment, else nothing.
     pub fn effective_roles(&self) -> Vec<Role> {
-        self.roles.lock().unwrap().iter().map(|r| r.clone().unwrap_or(Role::Unknown)).collect()
+        self.roles
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| r.clone().unwrap_or(Role::Unknown))
+            .collect()
     }
 
     /// Rebuilds decoders from the current role assignments.
@@ -320,9 +321,17 @@ impl Pipeline {
         let names: Vec<String> = a.decoders().iter().map(|d| d.name()).collect();
         let mut out = Vec::with_capacity(new + 1);
         if pending > new as u64 {
-            out.push(format!("[{} decoded events not shown: log history overflowed]", pending - new as u64));
+            out.push(format!(
+                "[{} decoded events not shown: log history overflowed]",
+                pending - new as u64
+            ));
         }
-        out.extend(a.annotations.iter().skip(skip).map(|t| format_annotation(t, &names, a.samplerate())));
+        out.extend(
+            a.annotations
+                .iter()
+                .skip(skip)
+                .map(|t| format_annotation(t, &names, a.samplerate())),
+        );
         out
     }
 }
@@ -337,7 +346,11 @@ pub fn format_annotation(t: &Tagged, names: &[String], samplerate: u64) -> Strin
 /// Renders a decoded event.
 pub fn format_event(e: &Event) -> String {
     match e {
-        Event::UartByte { value, framing_error, parity_error } => {
+        Event::UartByte {
+            value,
+            framing_error,
+            parity_error,
+        } => {
             let c = char::from_u32(*value as u32).filter(|c| c.is_ascii_graphic() || *c == ' ');
             let mut s = match c {
                 Some(c) => format!("{value:02x} '{c}'"),
@@ -355,7 +368,11 @@ pub fn format_event(e: &Event) -> String {
         Event::I2cStart => "START".into(),
         Event::I2cStop => "STOP".into(),
         Event::I2cAddress { addr, read, ack } => {
-            format!("addr {addr:#04x} {} {}", if *read { "R" } else { "W" }, if *ack { "ACK" } else { "NAK" })
+            format!(
+                "addr {addr:#04x} {} {}",
+                if *read { "R" } else { "W" },
+                if *ack { "ACK" } else { "NAK" }
+            )
         }
         Event::I2cData { value, ack } => format!("data {value:02x} {}", if *ack { "ACK" } else { "NAK" }),
         Event::SpiSelect(true) => "CS asserted".into(),
@@ -392,15 +409,13 @@ pub fn fmt_bytes(n: u64) -> String {
 struct Recorder(Box<dyn SampleWriter>);
 
 impl Recorder {
-    fn create(
-        path: &std::path::Path,
-        info: &CaptureInfo,
-        names: &[String],
-        extra: Vec<(String, String)>,
-    ) -> std::io::Result<Recorder> {
+    fn create(path: &std::path::Path, info: &CaptureInfo, names: &[String], extra: Vec<(String, String)>) -> std::io::Result<Recorder> {
         let mut info = info.clone();
         info.names = names.to_vec();
-        let opts = WriteOptions { extra, ..Default::default() };
+        let opts = WriteOptions {
+            extra,
+            ..Default::default()
+        };
         Ok(Recorder(visgrok::formats::create(path, &info, &opts)?))
     }
 

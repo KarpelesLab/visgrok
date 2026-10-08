@@ -52,7 +52,9 @@ impl Synth {
             uart_levels.extend([true, true]);
         }
         uart_levels.extend([true; 200]);
-        let uart = Wave { bits: resample(&uart_levels, bit, 1 << 1) };
+        let uart = Wave {
+            bits: resample(&uart_levels, bit, 1 << 1),
+        };
 
         // I2C: write 3 bytes to 0x50, then idle for a few ms.
         let half = sr / 200_000.0 / 1.5;
@@ -66,7 +68,10 @@ impl Synth {
         phases.extend([(false, false), (true, false), (true, true)]);
         phases.extend([(true, true); 400]);
         let i2c = Wave {
-            bits: resample_multi(&phases.iter().map(|&(c, d)| (c as u8) << 2 | (d as u8) << 3).collect::<Vec<_>>(), half),
+            bits: resample_multi(
+                &phases.iter().map(|&(c, d)| (c as u8) << 2 | (d as u8) << 3).collect::<Vec<_>>(),
+                half,
+            ),
         };
 
         // SPI mode 0, CS active low, 4-byte transfers.
@@ -81,7 +86,9 @@ impl Synth {
         }
         st.extend([0x00, 0x80]);
         st.extend([0x80; 200]);
-        let spi = Wave { bits: resample_multi(&st, half) };
+        let spi = Wave {
+            bits: resample_multi(&st, half),
+        };
 
         Synth {
             samplerate,
@@ -131,7 +138,10 @@ impl Synth {
             let half = sr / 8_000_000.0;
             let mut v = Vec::new();
             if frame == 0 {
-                let init = [0xae, 0xd5, 0x80, 0xa8, 0x3f, 0xd3, 0x00, 0x40, 0x8d, 0x14, 0x20, 0x00, 0xa1, 0xc8, 0xda, 0x12, 0x81, 0xcf, 0xd9, 0xf1, 0xdb, 0x40, 0xa4, 0xa6, 0xaf];
+                let init = [
+                    0xae, 0xd5, 0x80, 0xa8, 0x3f, 0xd3, 0x00, 0x40, 0x8d, 0x14, 0x20, 0x00, 0xa1, 0xc8, 0xda, 0x12, 0x81, 0xcf, 0xd9, 0xf1,
+                    0xdb, 0x40, 0xa4, 0xa6, 0xaf,
+                ];
                 spi_bytes(&mut v, &init, false, half);
             }
             spi_bytes(&mut v, &[0x21, 0, 127, 0x22, 0, 7], false, half);
@@ -155,7 +165,11 @@ struct Track {
 
 impl Track {
     fn new(next_segment: impl FnMut() -> Vec<u8> + Send + 'static) -> Track {
-        Track { cur: Vec::new(), start: 0, next_segment: Box::new(next_segment) }
+        Track {
+            cur: Vec::new(),
+            start: 0,
+            next_segment: Box::new(next_segment),
+        }
     }
 
     /// Bits at sample `i`; `i` must not go backwards.
@@ -177,7 +191,9 @@ fn uart_bytes(v: &mut Vec<u8>, bytes: &[u8], bit: f64, gap_bits: usize) {
     let base = v.len() as f64;
     let mut t = 0.0;
     for &b in bytes {
-        let bits = std::iter::once(0).chain((0..8).map(|k| b >> k & 1)).chain(std::iter::repeat_n(1, 1 + gap_bits));
+        let bits = std::iter::once(0)
+            .chain((0..8).map(|k| b >> k & 1))
+            .chain(std::iter::repeat_n(1, 1 + gap_bits));
         for x in bits {
             t += bit;
             while (v.len() as f64) < base + t {
@@ -251,11 +267,11 @@ fn oled_frame(n: u64) -> Vec<u8> {
     out
 }
 
-
-
 fn resample(levels: &[bool], per: f64, bitmask: u8) -> Vec<u8> {
     let n = (levels.len() as f64 * per) as usize;
-    (0..n).map(|i| if levels[((i as f64) / per) as usize] { bitmask } else { 0 }).collect()
+    (0..n)
+        .map(|i| if levels[((i as f64) / per) as usize] { bitmask } else { 0 })
+        .collect()
 }
 
 fn resample_multi(states: &[u8], per: f64) -> Vec<u8> {
@@ -265,7 +281,13 @@ fn resample_multi(states: &[u8], per: f64) -> Vec<u8> {
 
 impl Source for Synth {
     fn info(&self) -> CaptureInfo {
-        CaptureInfo { device: "synthetic".into(), channels: 8, samplerate: self.samplerate, unit_size: 1, names: Vec::new() }
+        CaptureInfo {
+            device: "synthetic".into(),
+            channels: 8,
+            samplerate: self.samplerate,
+            unit_size: 1,
+            names: Vec::new(),
+        }
     }
 
     fn next_block(&mut self) -> io::Result<Option<Block>> {

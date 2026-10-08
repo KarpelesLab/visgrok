@@ -5,8 +5,8 @@ use std::collections::VecDeque;
 
 use crate::block::Block;
 use crate::decode::i2c::I2c;
-use crate::decode::spi::{Spi, SpiConfig};
 use crate::decode::sd::{Sd, SdConfig};
+use crate::decode::spi::{Spi, SpiConfig};
 use crate::decode::ssd1306::Ssd1306;
 use crate::decode::uart::{Parity, Uart, UartConfig};
 use crate::decode::{Annotation, Decoder};
@@ -255,9 +255,7 @@ impl Analyzer {
                     cfg.cs_active_high = opts.spi_cs_active_high;
                     match opts.spi_protocol {
                         SpiProtocol::Raw => out.push(Box::new(Spi::new(cfg))),
-                        SpiProtocol::Ssd1306 { width, height } => {
-                            out.push(Box::new(Ssd1306::new(cfg, width, height)))
-                        }
+                        SpiProtocol::Ssd1306 { width, height } => out.push(Box::new(Ssd1306::new(cfg, width, height))),
                     }
                 }
                 _ => {}
@@ -311,7 +309,10 @@ impl Analyzer {
                 d.transition(t, &mut self.ann_scratch);
             }
             d.advance(block.end(), &mut self.ann_scratch);
-            produced.extend(self.ann_scratch.drain(..).map(|a| Tagged { decoder: di, annotation: a }));
+            produced.extend(self.ann_scratch.drain(..).map(|a| Tagged {
+                decoder: di,
+                annotation: a,
+            }));
         }
         produced.sort_by_key(|t| t.annotation.start);
         for t in produced {
@@ -346,7 +347,11 @@ impl Analyzer {
         if let Some(last) = self.wave.back()
             && last.now != s
         {
-            self.wave.push_back(Transition { at, prev: last.now, now: s });
+            self.wave.push_back(Transition {
+                at,
+                prev: last.now,
+                now: s,
+            });
         }
     }
 }
@@ -416,7 +421,11 @@ mod tests {
             a.process(&Block::new(i as u64 * 65536, 1, c.to_vec()));
         }
         let s = a.suggest();
-        assert!(matches!(s[0].role, Role::Clock { hz } if (hz - 1_152_000.0).abs() < 1.0), "{:?}", s[0]);
+        assert!(
+            matches!(s[0].role, Role::Clock { hz } if (hz - 1_152_000.0).abs() < 1.0),
+            "{:?}",
+            s[0]
+        );
         assert_eq!(s[1].role, Role::Uart { baud: 115200 });
         assert_eq!(s[2].role, Role::I2cScl { sda: 3 });
         assert_eq!(s[3].role, Role::I2cSda { scl: 2 });
@@ -467,7 +476,10 @@ mod device_tests {
             Role::Unknown,
             Role::Unknown,
         ];
-        let opts = DecoderOptions { spi_protocol: SpiProtocol::Ssd1306 { width: 128, height: 64 }, ..Default::default() };
+        let opts = DecoderOptions {
+            spi_protocol: SpiProtocol::Ssd1306 { width: 128, height: 64 },
+            ..Default::default()
+        };
         let mut text = String::new();
         let mut bauds = Vec::new();
         let mut oled = Vec::new();
@@ -483,19 +495,32 @@ mod device_tests {
             let new = (a.annotation_count - before) as usize;
             for t in a.annotations.iter().skip(a.annotations.len() - new.min(a.annotations.len())) {
                 match &t.annotation.event {
-                    Event::UartByte { value, framing_error: false, .. } => text.push(*value as u8 as char),
+                    Event::UartByte {
+                        value,
+                        framing_error: false,
+                        ..
+                    } => text.push(*value as u8 as char),
                     Event::UartBaud { baud } => bauds.push(*baud),
                     Event::Protocol { text, .. } => oled.push(text.clone()),
                     _ => {}
                 }
             }
         }
-        assert!(text.starts_with("AT+BAUD=2000000\r\nOK\r\nfast packet 1.0: the quick brown fox"), "{text:?}");
-        assert!(text.contains("fast packet 1.19: the quick brown fox jumps over the lazy dog\r\n"), "{text:?}");
+        assert!(
+            text.starts_with("AT+BAUD=2000000\r\nOK\r\nfast packet 1.0: the quick brown fox"),
+            "{text:?}"
+        );
+        assert!(
+            text.contains("fast packet 1.19: the quick brown fox jumps over the lazy dog\r\n"),
+            "{text:?}"
+        );
         assert_eq!(&bauds[..3], &[21_500, 2_000_000, 21_500], "{bauds:?}");
         assert_eq!(oled[0], "ae: display OFF");
         assert!(oled.iter().any(|t| t == "af: display ON"));
-        assert!(oled.iter().filter(|t| t.starts_with("write 1024 bytes at page 0 col 0")).count() >= 5, "{oled:?}");
+        assert!(
+            oled.iter().filter(|t| t.starts_with("write 1024 bytes at page 0 col 0")).count() >= 5,
+            "{oled:?}"
+        );
         let d = a.decoders()[1].display().unwrap();
         assert!(d.on);
         // Border pixels are lit; with A1/C8 (mirrored) the border is still a border.

@@ -69,13 +69,23 @@ struct Pending {
 #[derive(Debug)]
 enum DatState {
     Idle,
-    Block { start: u64, width: usize, lines: Vec<Vec<bool>>, clocks: usize },
+    Block {
+        start: u64,
+        width: usize,
+        lines: Vec<Vec<bool>>,
+        clocks: usize,
+    },
     /// Waiting for (or reading) the CRC status token after a written block.
-    CrcStatus { bits: Vec<bool>, start: u64 },
+    CrcStatus {
+        bits: Vec<bool>,
+        start: u64,
+    },
     /// Just after a CRC status token: DAT0 low now means the card is busy
     /// programming (never the start of the next block).
     AfterToken,
-    Busy { start: u64 },
+    Busy {
+        start: u64,
+    },
 }
 
 /// Streaming SD bus decoder.
@@ -142,7 +152,11 @@ impl Sd {
     }
 
     fn note(out: &mut Vec<Annotation>, start: u64, end: u64, text: String) {
-        out.push(Annotation { start, end, event: Event::Protocol { proto: PROTO, text } });
+        out.push(Annotation {
+            start,
+            end,
+            event: Event::Protocol { proto: PROTO, text },
+        });
     }
 
     fn line(state: u32, ch: u8) -> bool {
@@ -174,7 +188,11 @@ impl Sd {
             }
             let bits = std::mem::take(&mut self.cmd_bits);
             let times = std::mem::take(&mut self.cmd_times);
-            let ok = if bits[1] { self.command(&bits, at, out) } else { self.response(&bits, at, out) };
+            let ok = if bits[1] {
+                self.command(&bits, at, out)
+            } else {
+                self.response(&bits, at, out)
+            };
             self.cmd_len = 0;
             if ok {
                 self.cmd_bits = bits;
@@ -296,8 +314,20 @@ impl Sd {
         // 2 + password length (18 for a 16-byte password), so accept any of
         // those when the CMD16 that set it wasn't captured.
         let lock: Vec<usize> = dedup(std::iter::once(self.block_len).chain(2..=34).collect());
-        let read = |sizes: Vec<usize>, left: Option<u32>, what: &'static str| Pending { dir: Dir::Read, sizes, left, addr: arg, what };
-        let write = |sizes: Vec<usize>, left: Option<u32>, what: &'static str| Pending { dir: Dir::Write, sizes, left, addr: arg, what };
+        let read = |sizes: Vec<usize>, left: Option<u32>, what: &'static str| Pending {
+            dir: Dir::Read,
+            sizes,
+            left,
+            addr: arg,
+            what,
+        };
+        let write = |sizes: Vec<usize>, left: Option<u32>, what: &'static str| Pending {
+            dir: Dir::Write,
+            sizes,
+            left,
+            addr: arg,
+            what,
+        };
         let p = match (app, idx) {
             (false, 17) => Some(read(mem.clone(), Some(1), "read block")),
             (false, 18) => Some(read(mem.clone(), self.block_count.take(), "read block")),
@@ -357,7 +387,11 @@ impl Sd {
                 format!(
                     "R3 ({for_cmd}) OCR {ocr:#010x}: {}{}{}",
                     if ready { "ready" } else { "busy (initializing)" },
-                    if ready { if ocr >> 30 & 1 != 0 { ", SDHC/SDXC" } else { ", SDSC" } } else { "" },
+                    if ready {
+                        if ocr >> 30 & 1 != 0 { ", SDHC/SDXC" } else { ", SDSC" }
+                    } else {
+                        ""
+                    },
                     if ocr >> 24 & 1 != 0 { ", 1.8V accepted" } else { "" }
                 )
             }
@@ -381,7 +415,11 @@ impl Sd {
                     Resp::None => "unexpected response",
                     _ => "R1",
                 };
-                let crc_note = if ok || matches!(self.expect, Resp::R4) { "" } else { " [CRC ERROR]" };
+                let crc_note = if ok || matches!(self.expect, Resp::R4) {
+                    ""
+                } else {
+                    " [CRC ERROR]"
+                };
                 // An R1 with ILLEGAL_COMMAND means no data will follow.
                 if payload >> 22 & 1 != 0 && matches!(self.expect, Resp::R1 | Resp::R1b) {
                     self.pending = None;
@@ -404,7 +442,16 @@ impl Sd {
     fn flush_noise(&mut self, out: &mut Vec<Annotation>) {
         if self.noise > 0 {
             let at = self.cmd_start;
-            Self::note(out, at, at, format!("(ignored {} noise frame{} on CMD)", self.noise, if self.noise == 1 { "" } else { "s" }));
+            Self::note(
+                out,
+                at,
+                at,
+                format!(
+                    "(ignored {} noise frame{} on CMD)",
+                    self.noise,
+                    if self.noise == 1 { "" } else { "s" }
+                ),
+            );
             self.noise = 0;
         }
     }
@@ -428,9 +475,19 @@ impl Sd {
                 let width = if have4 && self.bus4.unwrap_or(all_low) { 4 } else { 1 };
                 let max = p.sizes.iter().max().copied().unwrap_or(512);
                 let cap = clocks_for(max, width);
-                self.dat = DatState::Block { start: at, width, lines: vec![Vec::with_capacity(cap); width], clocks: 0 };
+                self.dat = DatState::Block {
+                    start: at,
+                    width,
+                    lines: vec![Vec::with_capacity(cap); width],
+                    clocks: 0,
+                };
             }
-            DatState::Block { start, width, lines, clocks } => {
+            DatState::Block {
+                start,
+                width,
+                lines,
+                clocks,
+            } => {
                 for (k, line) in lines.iter_mut().enumerate() {
                     let ch = self.cfg.dat[k].unwrap();
                     line.push(Self::line(state, ch));
@@ -485,15 +542,7 @@ impl Sd {
 
     /// Reports a block. `matched` is the size whose CRC checked out; `None`
     /// means none did, and the expected size is reported with the error.
-    fn finish_block(
-        &mut self,
-        start: u64,
-        end: u64,
-        width: usize,
-        lines: &[Vec<bool>],
-        matched: Option<usize>,
-        out: &mut Vec<Annotation>,
-    ) {
+    fn finish_block(&mut self, start: u64, end: u64, width: usize, lines: &[Vec<bool>], matched: Option<usize>, out: &mut Vec<Annotation>) {
         let Some(mut p) = self.pending.clone() else {
             self.dat = DatState::Idle;
             return;
@@ -517,9 +566,17 @@ impl Sd {
             }
             bytes.push(b);
         }
-        let extra = if p.what == "lock/unlock data" { lock_data(&bytes) } else { String::new() };
+        let extra = if p.what == "lock/unlock data" {
+            lock_data(&bytes)
+        } else {
+            String::new()
+        };
         let preview: String = bytes.iter().take(16).map(|b| format!("{b:02x} ")).collect();
-        let ascii: String = bytes.iter().take(16).map(|&b| if (0x20..0x7f).contains(&b) { b as char } else { '.' }).collect();
+        let ascii: String = bytes
+            .iter()
+            .take(16)
+            .map(|&b| if (0x20..0x7f).contains(&b) { b as char } else { '.' })
+            .collect();
         let addr = if p.what.ends_with("block") {
             match self.sdhc {
                 Some(true) => format!(" {}", p.addr),
@@ -548,9 +605,20 @@ impl Sd {
         }
         // Next block, if any.
         let step = if self.sdhc == Some(true) { 1 } else { size as u32 };
-        let next = Pending { addr: p.addr.wrapping_add(step), left: p.left.map(|n| n.saturating_sub(1)), ..p.clone() };
+        let next = Pending {
+            addr: p.addr.wrapping_add(step),
+            left: p.left.map(|n| n.saturating_sub(1)),
+            ..p.clone()
+        };
         self.pending = (next.left != Some(0)).then_some(next);
-        self.dat = if p.dir == Dir::Write { DatState::CrcStatus { bits: Vec::new(), start: end } } else { DatState::Idle };
+        self.dat = if p.dir == Dir::Write {
+            DatState::CrcStatus {
+                bits: Vec::new(),
+                start: end,
+            }
+        } else {
+            DatState::Idle
+        };
     }
 }
 
@@ -561,7 +629,11 @@ impl Decoder for Sd {
     }
 
     fn channels(&self) -> u32 {
-        self.cfg.dat.iter().flatten().fold(1 << self.cfg.clk | 1 << self.cfg.cmd, |m, &c| m | 1 << c)
+        self.cfg
+            .dat
+            .iter()
+            .flatten()
+            .fold(1 << self.cfg.clk | 1 << self.cfg.cmd, |m, &c| m | 1 << c)
     }
 
     fn init(&mut self, state: u32) {
@@ -911,13 +983,21 @@ pub(crate) mod tests {
 
     impl Bus {
         pub(crate) fn new() -> Bus {
-            Bus { st: 0b11_1110, at: 0, tr: Vec::new() }
+            Bus {
+                st: 0b11_1110,
+                at: 0,
+                tr: Vec::new(),
+            }
         }
 
         fn set(&mut self, v: u32) {
             self.at += 5;
             if v != self.st {
-                self.tr.push(Transition { at: self.at, prev: self.st, now: v });
+                self.tr.push(Transition {
+                    at: self.at,
+                    prev: self.st,
+                    now: v,
+                });
                 self.st = v;
             }
         }
@@ -1029,7 +1109,11 @@ pub(crate) mod tests {
     }
 
     fn cfg4() -> SdConfig {
-        SdConfig { clk: 0, cmd: 1, dat: [Some(2), Some(3), Some(4), Some(5)] }
+        SdConfig {
+            clk: 0,
+            cmd: 1,
+            dat: [Some(2), Some(3), Some(4), Some(5)],
+        }
     }
 
     #[test]
@@ -1189,7 +1273,14 @@ pub(crate) mod tests {
         bus.idle(4);
         // Only DAT0 assigned: 1-bit mode. Block length 16 via CMD16 in a real
         // card; set it directly here.
-        let mut d = Sd::new(SdConfig { clk: 0, cmd: 1, dat: [Some(2), None, None, None] }, 10_000_000);
+        let mut d = Sd::new(
+            SdConfig {
+                clk: 0,
+                cmd: 1,
+                dat: [Some(2), None, None, None],
+            },
+            10_000_000,
+        );
         d.block_len = 16;
         d.sdhc = Some(false);
         d.init(0b11_1110);
@@ -1207,7 +1298,10 @@ pub(crate) mod tests {
         let bytes = (c_size as u64 + 1) << (mult + 2) << bl;
         assert_eq!(
             t[1],
-            format!("R2 (CMD9) CSD v1: capacity {:.2} GB ({bytes} bytes), max speed 25 MHz, read block 512 B", bytes as f64 / 1e9)
+            format!(
+                "R2 (CMD9) CSD v1: capacity {:.2} GB ({bytes} bytes), max speed 25 MHz, read block 512 B",
+                bytes as f64 / 1e9
+            )
         );
         assert_eq!(t[2], "CMD18 READ_MULTIPLE_BLOCK byte address 0x1000");
         assert!(t[4].starts_with("read block @0x1000: 16 B, 1-bit, CRC ok · 30 31 32"), "{t:#?}");
@@ -1275,7 +1369,10 @@ pub(crate) mod tests {
             "{t:#?}"
         );
         assert!(t.iter().any(|s| s == "write CRC status 010: data accepted"));
-        assert!(t.iter().any(|s| s.starts_with("read block 7: 512 B, 4-bit, CRC ok · 42 42")), "{t:#?}");
+        assert!(
+            t.iter().any(|s| s.starts_with("read block 7: 512 B, 4-bit, CRC ok · 42 42")),
+            "{t:#?}"
+        );
     }
 
     #[test]
@@ -1293,7 +1390,8 @@ pub(crate) mod tests {
         d.bus4 = Some(true);
         let t = decode(&bus, &mut d);
         assert!(
-            t.iter().any(|s| s.starts_with("lock/unlock data: 8 B (size from CRC), 4-bit, CRC ok, UNLOCK, password (6 bytes) 'secret'")),
+            t.iter()
+                .any(|s| s.starts_with("lock/unlock data: 8 B (size from CRC), 4-bit, CRC ok, UNLOCK, password (6 bytes) 'secret'")),
             "{t:#?}"
         );
         assert!(t.iter().any(|s| s == "write CRC status 010: data accepted"), "{t:#?}");
@@ -1312,10 +1410,18 @@ pub(crate) mod tests {
         bus.idle(4);
         bus.block1(&lock_block(b"0123456789abcdef", 0x02)); // clear password
         bus.crc_status(0b010, 5);
-        let mut d = Sd::new(SdConfig { clk: 0, cmd: 1, dat: [Some(2), None, None, None] }, 10_000_000);
+        let mut d = Sd::new(
+            SdConfig {
+                clk: 0,
+                cmd: 1,
+                dat: [Some(2), None, None, None],
+            },
+            10_000_000,
+        );
         let t = decode(&bus, &mut d);
         assert!(
-            t.iter().any(|s| s.starts_with("lock/unlock data: 18 B, 1-bit, CRC ok, CLR_PWD, password (16 bytes)")),
+            t.iter()
+                .any(|s| s.starts_with("lock/unlock data: 18 B, 1-bit, CRC ok, CLR_PWD, password (16 bytes)")),
             "{t:#?}"
         );
         assert_eq!(d.block_len, 18);

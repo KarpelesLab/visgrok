@@ -12,7 +12,7 @@
 //!
 //! All integers are little endian. Sample chunks (`kind` 1) hold
 //! `raw_len / unit_size` consecutive samples in the same layout as
-//! [`Block`](crate::Block), compressed independently with zstd (`codec` 1)
+//! [`crate::Block`], compressed independently with zstd (`codec` 1)
 //! or stored (`codec` 0). Independent chunks let the writer compress on
 //! several threads and let readers seek. The index chunk (`kind` 0xFE)
 //! lists `(u64 offset, u64 first_sample)` for every sample chunk and has the
@@ -102,7 +102,10 @@ impl Meta {
         s += &format!("channels={}\n", self.channels);
         s += &format!("samplerate={}\n", self.samplerate);
         s += &format!("unit_size={}\n", self.unit_size);
-        s += &format!("names={}\n", self.names.iter().map(|n| clean(n).replace(',', "_")).collect::<Vec<_>>().join(","));
+        s += &format!(
+            "names={}\n",
+            self.names.iter().map(|n| clean(n).replace(',', "_")).collect::<Vec<_>>().join(",")
+        );
         s += &format!("started_ms={}\n", self.started_ms);
         for (k, v) in &self.extra {
             s += &format!("{}={}\n", clean(k).replace('=', "_"), clean(v));
@@ -154,7 +157,9 @@ fn chunk_header(kind: u8, codec: Codec, first: u64, raw_len: usize, stored_len: 
 fn encode_chunk(first: u64, raw: &[u8], compress: bool) -> Vec<u8> {
     let crc = crc32(raw);
     let packed = if compress {
-        compress_to_vec_with::<Zstd>(raw, EncoderConfig { level: 1 }).ok().filter(|p| p.len() < raw.len())
+        compress_to_vec_with::<Zstd>(raw, EncoderConfig { level: 1 })
+            .ok()
+            .filter(|p| p.len() < raw.len())
     } else {
         None
     };
@@ -305,7 +310,14 @@ impl<W: Write + Send + 'static> VgkWriter<W> {
             payload.extend_from_slice(&first.to_le_bytes());
         }
         let index_at = self.pos;
-        let h = chunk_header(kind::INDEX, Codec::Store, self.samples, payload.len(), payload.len(), crc32(&payload));
+        let h = chunk_header(
+            kind::INDEX,
+            Codec::Store,
+            self.samples,
+            payload.len(),
+            payload.len(),
+            crc32(&payload),
+        );
         self.out.write_all(&h)?;
         self.out.write_all(&payload)?;
         self.out.write_all(FOOTER_MAGIC)?;
@@ -382,7 +394,14 @@ impl<R: Read> VgkReader<R> {
             return Err(invalid("metadata checksum mismatch".into()));
         }
         let text = String::from_utf8(text).map_err(|_| invalid("metadata is not UTF-8".into()))?;
-        Ok(VgkReader { input, meta: Meta::decode(&text)?, next_sample: 0, truncated: false, total: None, finished: false })
+        Ok(VgkReader {
+            input,
+            meta: Meta::decode(&text)?,
+            next_sample: 0,
+            truncated: false,
+            total: None,
+            finished: false,
+        })
     }
 
     /// The capture's metadata.
@@ -508,7 +527,13 @@ mod tests {
 
     #[test]
     fn truncated_file_is_readable() {
-        let meta = Meta { device: "t".into(), channels: 8, samplerate: 1000, unit_size: 1, ..Default::default() };
+        let meta = Meta {
+            device: "t".into(),
+            channels: 8,
+            samplerate: 1000,
+            unit_size: 1,
+            ..Default::default()
+        };
         let mut w = VgkWriter::new(Vec::new(), &meta, 100, Some(1)).unwrap();
         w.write(&(0..1000u32).map(|i| (i / 3) as u8).collect::<Vec<_>>()).unwrap();
         let buf = w.finish().unwrap();
