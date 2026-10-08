@@ -1,22 +1,22 @@
-//! Prints transitions from a .vgk capture.
+//! Prints transitions from a capture (.vgk, .sr, .vcd).
 //! Usage: vgk_edges FILE CHANNEL_MASK [FROM_S] [TO_S] [MAX]
 use visgrok::EdgeDetector;
-use visgrok::vgk::VgkReader;
+use visgrok::formats::{ReadOptions, open};
 
 fn main() -> std::io::Result<()> {
     let a: Vec<String> = std::env::args().collect();
-    let mut r = VgkReader::open(&a[1])?;
+    let mut r = open(a[1].as_ref(), &ReadOptions::default())?;
     let mask: u32 = a[2].parse().unwrap();
     let from: f64 = a.get(3).map_or(0.0, |s| s.parse().unwrap());
     let to: f64 = a.get(4).map_or(f64::MAX, |s| s.parse().unwrap());
     let max: usize = a.get(5).map_or(200, |s| s.parse().unwrap());
-    let sr = r.meta().samplerate as f64;
-    let names = r.meta().names.clone();
+    let sr = r.info().samplerate as f64;
+    let names = r.info().all_names();
     let mut det = EdgeDetector::new(mask);
     let mut tr = Vec::new();
     let mut shown = 0;
     let mut last = [0u64; 16];
-    while let Some(b) = r.read_block()? {
+    while let Some(b) = r.next_block()? {
         if (b.end() as f64) < from * sr {
             // still feed the detector so levels are right
             tr.clear();

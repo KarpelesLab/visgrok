@@ -50,11 +50,11 @@ impl<W: Write> VcdWriter<W> {
     pub fn new(mut out: W, info: &CaptureInfo) -> io::Result<VcdWriter<W>> {
         // Pick the largest time unit that divides the sample period exactly.
         let period_fs = 1_000_000_000_000_000u128 / info.samplerate.max(1) as u128;
-        let exact = 1_000_000_000_000_000u128 % info.samplerate.max(1) as u128 == 0;
+        let exact = 1_000_000_000_000_000u128.is_multiple_of(info.samplerate.max(1) as u128);
         let (unit, unit_fs) = UNITS
             .iter()
             .copied()
-            .find(|&(_, u)| exact && period_fs % u == 0)
+            .find(|&(_, u)| exact && period_fs.is_multiple_of(u))
             .unwrap_or(("fs", 1));
         let step = period_fs / unit_fs;
         let mut h = String::new();

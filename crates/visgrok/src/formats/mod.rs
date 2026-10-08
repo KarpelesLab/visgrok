@@ -328,7 +328,7 @@ mod tests {
                 x ^= x << 13;
                 x ^= x >> 17;
                 x ^= x << 5;
-                let noise = if x % 97 == 0 { 0x800 } else { 0 };
+                let noise = if x.is_multiple_of(97) { 0x800 } else { 0 };
                 let v = ((i / 3) & 0xff) as u16 | ((i / 1000) as u16 & 7) << 8 | noise;
                 v.to_le_bytes()
             })

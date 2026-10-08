@@ -84,6 +84,8 @@ pub struct Sd {
     clk: bool,
     // CMD line.
     cmd_bits: Vec<bool>,
+    /// Sample index of each bit in `cmd_bits` (for resynchronizing).
+    cmd_times: Vec<u64>,
     cmd_len: usize,
     cmd_start: u64,
     app_next: bool,
@@ -100,6 +102,14 @@ pub struct Sd {
     pending: Option<Pending>,
     dat: DatState,
     samplerate: u64,
+    // Glitch filter: recent changes on CMD/DAT and pending rising edges.
+    /// Line state before the first entry of `history`.
+    base: u32,
+    history: std::collections::VecDeque<Transition>,
+    rises: std::collections::VecDeque<u64>,
+    last_rise: Option<u64>,
+    /// CMD frames ignored as line noise since the last real frame.
+    noise: u32,
 }
 
 impl Sd {
@@ -109,6 +119,7 @@ impl Sd {
             cfg,
             clk: false,
             cmd_bits: Vec::with_capacity(136),
+            cmd_times: Vec::with_capacity(136),
             cmd_len: 0,
             cmd_start: 0,
             app_next: false,
@@ -122,6 +133,11 @@ impl Sd {
             pending: None,
             dat: DatState::Idle,
             samplerate,
+            base: 0,
+            history: Default::default(),
+            rises: Default::default(),
+            last_rise: None,
+            noise: 0,
         }
     }
 
@@ -139,34 +155,68 @@ impl Sd {
         if self.cmd_len == 0 {
             if !b {
                 self.cmd_bits.clear();
+                self.cmd_times.clear();
                 self.cmd_bits.push(false);
+                self.cmd_times.push(at);
                 self.cmd_start = at;
                 self.cmd_len = 2; // decided after the direction bit
             }
             return;
         }
         self.cmd_bits.push(b);
-        if self.cmd_bits.len() == 2 {
-            self.cmd_len = if b || self.expect != Resp::R2 { 48 } else { 136 };
-        }
-        if self.cmd_bits.len() == self.cmd_len {
-            let bits = std::mem::take(&mut self.cmd_bits);
-            self.cmd_len = 0;
-            if bits[1] {
-                self.command(&bits, at, out);
-            } else {
-                self.response(&bits, at, out);
+        self.cmd_times.push(at);
+        loop {
+            if self.cmd_bits.len() >= 2 && self.cmd_len == 2 {
+                self.cmd_len = if self.cmd_bits[1] || self.expect != Resp::R2 { 48 } else { 136 };
             }
-            self.cmd_bits = bits;
+            if self.cmd_bits.len() < self.cmd_len {
+                return;
+            }
+            let bits = std::mem::take(&mut self.cmd_bits);
+            let times = std::mem::take(&mut self.cmd_times);
+            let ok = if bits[1] { self.command(&bits, at, out) } else { self.response(&bits, at, out) };
+            self.cmd_len = 0;
+            if ok {
+                self.cmd_bits = bits;
+                self.cmd_times = times;
+                self.cmd_bits.clear();
+                self.cmd_times.clear();
+                return;
+            }
+            // Not a frame: a glitch looked like a start bit. A real frame
+            // may begin later inside these bits; restart at the next 0.
+            let Some(k) = bits.iter().skip(1).position(|b| !b).map(|p| p + 1) else {
+                return;
+            };
+            self.cmd_bits = bits[k..].to_vec();
+            self.cmd_times = times[k..].to_vec();
+            self.cmd_start = self.cmd_times[0];
+            self.cmd_len = 2;
         }
     }
 
-    fn command(&mut self, bits: &[bool], end: u64, out: &mut Vec<Annotation>) {
+    /// Handles a host command frame; false if it isn't one (bad CRC).
+    fn command(&mut self, bits: &[bool], end: u64, out: &mut Vec<Annotation>) -> bool {
         let idx = field(bits, 2, 6) as u8;
         let arg = field(bits, 8, 32) as u32;
         let crc = field(bits, 40, 7) as u8;
         let crc_ok = crc7(&bits[..40]) == crc && bits[47];
+        if !crc_ok {
+            // A host never sends a bad CRC on a sane bus (and the card would
+            // flag COM_CRC_ERROR); this is crosstalk on an idle CMD line.
+            self.noise += 1;
+            return false;
+        }
+        // CRC7 lets 1 in 128 noise frames through; reject implausible ones:
+        // unknown commands, and anything but STOP/STATUS/reset while a data
+        // transfer is running.
         let app = self.app_next;
+        let transferring = self.pending.is_some() || matches!(self.dat, DatState::Block { .. });
+        if command_info(idx, app).0 == "(unknown)" || (transferring && !app && !matches!(idx, 0 | 12 | 13)) {
+            self.noise += 1;
+            return false;
+        }
+        self.flush_noise(out);
         self.app_next = idx == 55 && !app;
         self.last = Some((idx, app, arg));
         let (name, resp) = command_info(idx, app);
@@ -208,9 +258,6 @@ impl Sd {
         let mut text = format!("{prefix}{idx} {name}");
         if !detail.is_empty() {
             text += &format!(" {detail}");
-        }
-        if !crc_ok {
-            text += " [CRC ERROR]";
         }
         Self::note(out, self.cmd_start, end, text);
 
@@ -275,10 +322,18 @@ impl Sd {
         if p.is_some() {
             self.pending = p;
         }
+        true
     }
 
-    fn response(&mut self, bits: &[bool], end: u64, out: &mut Vec<Annotation>) {
+    /// Handles a card response frame; false if it is noise.
+    fn response(&mut self, bits: &[bool], end: u64, out: &mut Vec<Annotation>) -> bool {
         let start = self.cmd_start;
+        // A response nobody asked for is noise, even with a valid CRC.
+        if self.expect == Resp::None {
+            self.noise += 1;
+            return false;
+        }
+        self.flush_noise(out);
         let for_cmd = match self.last {
             Some((i, app, _)) => format!("{}{i}", if app { "ACMD" } else { "CMD" }),
             None => "?".into(),
@@ -343,6 +398,15 @@ impl Sd {
         };
         self.expect = Resp::None;
         Self::note(out, start, end, text);
+        true
+    }
+
+    fn flush_noise(&mut self, out: &mut Vec<Annotation>) {
+        if self.noise > 0 {
+            let at = self.cmd_start;
+            Self::note(out, at, at, format!("(ignored {} noise frame{} on CMD)", self.noise, if self.noise == 1 { "" } else { "s" }));
+            self.noise = 0;
+        }
     }
 
     // ---------------------------------------------------------------- DAT
@@ -502,19 +566,87 @@ impl Decoder for Sd {
 
     fn init(&mut self, state: u32) {
         self.clk = Self::line(state, self.cfg.clk);
+        self.base = state;
+        self.history.clear();
+        self.rises.clear();
+        self.last_rise = None;
     }
 
     fn transition(&mut self, t: &Transition, out: &mut Vec<Annotation>) {
+        let data_mask = self.channels() & !(1 << self.cfg.clk);
+        if t.changed() & data_mask != 0 {
+            self.history.push_back(*t);
+        }
         let clk = Self::line(t.now, self.cfg.clk);
         let rising = clk && !self.clk;
         self.clk = clk;
-        if !rising {
-            return;
+        if rising {
+            self.rises.push_back(t.at);
         }
-        // Sample the lines as they were just before the edge.
-        let s = t.prev;
-        self.cmd_bit(Self::line(s, self.cfg.cmd), t.at, out);
-        self.dat_clock(s, t.at, out);
+        self.drain(t.at, false, out);
+    }
+
+    fn advance(&mut self, to: u64, out: &mut Vec<Annotation>) {
+        self.drain(to, false, out);
+    }
+}
+
+impl Sd {
+    /// Line state at sample `x` according to the change history.
+    fn state_at(&self, x: u64) -> u32 {
+        let i = self.history.partition_point(|t| t.at <= x);
+        if i == 0 { self.base } else { self.history[i - 1].now }
+    }
+
+    /// The level of `ch` just before the rising edge at `e`, ignoring pulses
+    /// shorter than `w` samples (crosstalk from neighbouring lines: a real
+    /// CMD/DAT level lasts at least one clock period).
+    fn filtered(&self, ch: u8, e: u64, w: u64) -> bool {
+        let x = e.saturating_sub(1);
+        let raw = Self::line(self.state_at(x), ch);
+        let changes = |t: &&Transition| t.changed() >> ch & 1 != 0;
+        let started = self.history.iter().filter(|t| t.at <= x).rev().find(changes).map(|t| t.at);
+        let ended = self.history.iter().filter(|t| t.at > x).find(changes).map(|t| t.at);
+        match (started, ended) {
+            (Some(s), Some(e2)) if e2 - s < w => !raw,
+            _ => raw,
+        }
+    }
+
+    /// Processes rising edges once enough of what follows them is known to
+    /// judge glitches (up to ¾ of the local clock period past the edge).
+    fn drain(&mut self, now: u64, _flush: bool, out: &mut Vec<Annotation>) {
+        while let Some(&e) = self.rises.front() {
+            let prev = self.last_rise.map(|p| e - p);
+            let next = self.rises.get(1).map(|&n| n - e);
+            let period = match (prev, next) {
+                (Some(a), Some(b)) => a.min(b),
+                (Some(a), None) => a,
+                (None, Some(b)) => b,
+                (None, None) => break, // wait for a second edge
+            };
+            let w = period * 3 / 4;
+            if next.is_none() && now < e + w {
+                break;
+            }
+            let mut state = self.state_at(e.saturating_sub(1));
+            for ch in std::iter::once(self.cfg.cmd).chain(self.cfg.dat.iter().flatten().copied()) {
+                if self.filtered(ch, e, w) {
+                    state |= 1 << ch;
+                } else {
+                    state &= !(1 << ch);
+                }
+            }
+            self.rises.pop_front();
+            self.last_rise = Some(e);
+            self.cmd_bit(Self::line(state, self.cfg.cmd), e, out);
+            self.dat_clock(state, e, out);
+            // Forget changes older than the edge before this one.
+            let keep_from = e.saturating_sub(period * 2);
+            while self.history.front().is_some_and(|t| t.at < keep_from) {
+                self.base = self.history.pop_front().unwrap().now;
+            }
+        }
     }
 }
 
@@ -548,21 +680,23 @@ fn lock_data(b: &[u8]) -> String {
     if b.is_empty() {
         return String::new();
     }
+    // Flags: bit0 SET_PWD, bit1 CLR_PWD, bit2 LOCK_UNLOCK (1 = lock),
+    // bit3 ERASE. With none of SET/CLR/ERASE, bit2 = 0 means unlock.
     let f = b[0];
     let mut ops = Vec::new();
     if f & 0x08 != 0 {
         ops.push("ERASE (forced)");
     }
-    if f & 0x04 != 0 {
-        ops.push("LOCK");
-    } else if f & 0x08 == 0 {
-        ops.push("UNLOCK");
+    if f & 0x01 != 0 {
+        ops.push("SET_PWD");
     }
     if f & 0x02 != 0 {
         ops.push("CLR_PWD");
     }
-    if f & 0x01 != 0 {
-        ops.push("SET_PWD");
+    if f & 0x04 != 0 {
+        ops.push("LOCK");
+    } else if f & 0x0b == 0 {
+        ops.push("UNLOCK");
     }
     let mut s = format!(", {}", ops.join(" + "));
     if let Some(&len) = b.get(1) {
@@ -1137,7 +1271,7 @@ pub(crate) mod tests {
         let t = decode(&bus, &mut d);
         let lock = t.iter().find(|s| s.starts_with("lock/unlock data")).expect("lock block");
         assert!(
-            lock.starts_with("lock/unlock data: 18 B, 4-bit, CRC ok, LOCK + SET_PWD, password (16 bytes) '0123456789abcdef'"),
+            lock.starts_with("lock/unlock data: 18 B, 4-bit, CRC ok, SET_PWD + LOCK, password (16 bytes) '0123456789abcdef'"),
             "{t:#?}"
         );
         assert!(t.iter().any(|s| s == "write CRC status 010: data accepted"));
@@ -1181,7 +1315,7 @@ pub(crate) mod tests {
         let mut d = Sd::new(SdConfig { clk: 0, cmd: 1, dat: [Some(2), None, None, None] }, 10_000_000);
         let t = decode(&bus, &mut d);
         assert!(
-            t.iter().any(|s| s.starts_with("lock/unlock data: 18 B, 1-bit, CRC ok, UNLOCK + CLR_PWD, password (16 bytes)")),
+            t.iter().any(|s| s.starts_with("lock/unlock data: 18 B, 1-bit, CRC ok, CLR_PWD, password (16 bytes)")),
             "{t:#?}"
         );
         assert_eq!(d.block_len, 18);
