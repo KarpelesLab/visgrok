@@ -54,7 +54,11 @@ enum Dir {
 #[derive(Clone, Debug)]
 struct Pending {
     dir: Dir,
-    size: usize,
+    /// Candidate block sizes, the expected one first. The block length is
+    /// variable (CMD16, e.g. 18 bytes for a CMD42 password block) and the
+    /// capture may not include the command that set it, so the size whose
+    /// CRC16 and end bit check out wins.
+    sizes: Vec<usize>,
     /// Blocks left; `None` until STOP_TRANSMISSION (or CMD23's count).
     left: Option<u32>,
     /// Address of the next block (block or byte address, as sent).
@@ -65,7 +69,7 @@ struct Pending {
 #[derive(Debug)]
 enum DatState {
     Idle,
-    Block { start: u64, width: usize, lines: Vec<Vec<bool>>, clocks: usize, need: usize },
+    Block { start: u64, width: usize, lines: Vec<Vec<bool>>, clocks: usize },
     /// Waiting for (or reading) the CRC status token after a written block.
     CrcStatus { bits: Vec<bool>, start: u64 },
     /// Just after a CRC status token: DAT0 low now means the card is busy
@@ -90,6 +94,8 @@ pub struct Sd {
     block_len: usize,
     bus4: Option<bool>,
     block_count: Option<u32>,
+    /// Block length before an unconfirmed CMD16, restored if it fails.
+    block_len_prev: Option<usize>,
     // DAT lines.
     pending: Option<Pending>,
     dat: DatState,
@@ -112,6 +118,7 @@ impl Sd {
             block_len: 512,
             bus4: None,
             block_count: None,
+            block_len_prev: None,
             pending: None,
             dat: DatState::Idle,
             samplerate,
@@ -208,8 +215,14 @@ impl Sd {
         Self::note(out, self.cmd_start, end, text);
 
         // What happens next on the DAT lines.
-        let size = if self.sdhc == Some(true) { 512 } else { self.block_len };
         match (app, idx) {
+            (false, 0) => {
+                // Back to defaults: 512-byte blocks, 1-bit bus.
+                self.block_len = 512;
+                self.bus4 = Some(false);
+                self.block_count = None;
+                self.pending = None;
+            }
             (false, 12) => {
                 if let DatState::Block { start, .. } = self.dat {
                     Self::note(out, start, end, "data block cut short by STOP_TRANSMISSION".into());
@@ -217,32 +230,46 @@ impl Sd {
                 }
                 self.pending = None;
             }
-            (false, 16) => self.block_len = arg as usize,
+            (false, 16) => {
+                self.block_len_prev = Some(self.block_len);
+                self.block_len = arg as usize;
+            }
             (false, 23) => self.block_count = Some(arg & 0xffff),
             (true, 6) => self.bus4 = Some(arg & 3 == 2),
             _ => {}
         }
-        let read = |size: usize, left: Option<u32>, what: &'static str| Pending { dir: Dir::Read, size, left, addr: arg, what };
-        let write = |size: usize, left: Option<u32>, what: &'static str| Pending { dir: Dir::Write, size, left, addr: arg, what };
+        // Memory blocks: 512 bytes on SDHC/SDXC whatever CMD16 said, the
+        // CMD16 length on SDSC; both when the card type is unknown.
+        let mem: Vec<usize> = match self.sdhc {
+            Some(true) => vec![512],
+            Some(false) => vec![self.block_len],
+            None => dedup(vec![self.block_len, 512]),
+        };
+        // CMD42 always uses the CMD16 length (also on SDHC); it is usually
+        // 2 + password length (18 for a 16-byte password), so accept any of
+        // those when the CMD16 that set it wasn't captured.
+        let lock: Vec<usize> = dedup(std::iter::once(self.block_len).chain(2..=34).collect());
+        let read = |sizes: Vec<usize>, left: Option<u32>, what: &'static str| Pending { dir: Dir::Read, sizes, left, addr: arg, what };
+        let write = |sizes: Vec<usize>, left: Option<u32>, what: &'static str| Pending { dir: Dir::Write, sizes, left, addr: arg, what };
         let p = match (app, idx) {
-            (false, 17) => Some(read(size, Some(1), "read block")),
-            (false, 18) => Some(read(size, self.block_count.take(), "read block")),
-            (false, 24) => Some(write(size, Some(1), "write block")),
-            (false, 25) => Some(write(size, self.block_count.take(), "write block")),
-            (false, 6) => Some(read(64, Some(1), "switch function status")),
-            (false, 19) => Some(read(64, Some(1), "tuning block")),
-            (false, 30) => Some(read(4, Some(1), "write protection bits")),
-            (false, 42) => Some(write(self.block_len, Some(1), "lock/unlock data")),
+            (false, 17) => Some(read(mem.clone(), Some(1), "read block")),
+            (false, 18) => Some(read(mem.clone(), self.block_count.take(), "read block")),
+            (false, 24) => Some(write(mem.clone(), Some(1), "write block")),
+            (false, 25) => Some(write(mem.clone(), self.block_count.take(), "write block")),
+            (false, 6) => Some(read(vec![64], Some(1), "switch function status")),
+            (false, 19) => Some(read(vec![64], Some(1), "tuning block")),
+            (false, 30) => Some(read(vec![4], Some(1), "write protection bits")),
+            (false, 42) => Some(write(lock, Some(1), "lock/unlock data")),
             (false, 56) => Some(Pending {
                 dir: if arg & 1 != 0 { Dir::Read } else { Dir::Write },
-                size: self.block_len,
+                sizes: mem.clone(),
                 left: Some(1),
                 addr: arg,
                 what: "general command data",
             }),
-            (true, 13) => Some(read(64, Some(1), "SD status")),
-            (true, 22) => Some(read(4, Some(1), "number of written blocks")),
-            (true, 51) => Some(read(8, Some(1), "SCR")),
+            (true, 13) => Some(read(vec![64], Some(1), "SD status")),
+            (true, 22) => Some(read(vec![4], Some(1), "number of written blocks")),
+            (true, 51) => Some(read(vec![8], Some(1), "SCR")),
             _ => None,
         };
         if p.is_some() {
@@ -304,6 +331,13 @@ impl Sd {
                 if payload >> 22 & 1 != 0 && matches!(self.expect, Resp::R1 | Resp::R1b) {
                     self.pending = None;
                 }
+                // A rejected CMD16 leaves the block length unchanged.
+                if idx == 16
+                    && let Some(prev) = self.block_len_prev.take()
+                    && payload & (1 << 29 | 1 << 22 | 1 << 19) != 0
+                {
+                    self.block_len = prev;
+                }
                 format!("{kind} (CMD{idx}) {body}{crc_note}")
             }
         };
@@ -328,19 +362,28 @@ impl Sd {
                 let have4 = self.cfg.dat.iter().all(Option::is_some);
                 let all_low = self.cfg.dat.iter().flatten().all(|&c| !Self::line(state, c));
                 let width = if have4 && self.bus4.unwrap_or(all_low) { 4 } else { 1 };
-                let need = p.size * 8 / width + 16 + 1;
-                self.dat = DatState::Block { start: at, width, lines: vec![Vec::with_capacity(need); width], clocks: 0, need };
+                let max = p.sizes.iter().max().copied().unwrap_or(512);
+                let cap = clocks_for(max, width);
+                self.dat = DatState::Block { start: at, width, lines: vec![Vec::with_capacity(cap); width], clocks: 0 };
             }
-            DatState::Block { start, width, lines, clocks, need } => {
+            DatState::Block { start, width, lines, clocks } => {
                 for (k, line) in lines.iter_mut().enumerate() {
                     let ch = self.cfg.dat[k].unwrap();
                     line.push(Self::line(state, ch));
                 }
                 *clocks += 1;
-                if *clocks == *need {
-                    let (start, width) = (*start, *width);
+                let (start, width, clocks) = (*start, *width, *clocks);
+                let sizes = self.pending.as_ref().map_or(vec![512], |p| p.sizes.clone());
+                // Smallest candidate first: finish as soon as one checks out.
+                let matched = sizes
+                    .iter()
+                    .copied()
+                    .filter(|&s| clocks_for(s, width) == clocks)
+                    .find(|&s| block_ok(lines, width, s) == (true, true));
+                let last = sizes.iter().map(|&s| clocks_for(s, width)).max().unwrap_or(0) == clocks;
+                if matched.is_some() || last {
                     let lines = std::mem::take(lines);
-                    self.finish_block(start, at, width, &lines, out);
+                    self.finish_block(start, at, width, &lines, matched, out);
                 }
             }
             DatState::CrcStatus { bits, start } => {
@@ -376,24 +419,28 @@ impl Sd {
         }
     }
 
-    fn finish_block(&mut self, start: u64, end: u64, width: usize, lines: &[Vec<bool>], out: &mut Vec<Annotation>) {
-        let Some(p) = self.pending.clone() else {
+    /// Reports a block. `matched` is the size whose CRC checked out; `None`
+    /// means none did, and the expected size is reported with the error.
+    fn finish_block(
+        &mut self,
+        start: u64,
+        end: u64,
+        width: usize,
+        lines: &[Vec<bool>],
+        matched: Option<usize>,
+        out: &mut Vec<Annotation>,
+    ) {
+        let Some(mut p) = self.pending.clone() else {
             self.dat = DatState::Idle;
             return;
         };
-        let data_clocks = p.size * 8 / width;
-        let mut crc_ok = true;
-        for line in lines {
-            let want = field(&line[data_clocks..], 0, 16) as u16;
-            if crc16(&line[..data_clocks]) != want {
-                crc_ok = false;
-            }
-        }
-        let end_ok = lines.iter().all(|l| l[data_clocks + 16]);
+        let size = matched.unwrap_or(p.sizes[0]);
+        let (crc_ok, end_ok) = block_ok(lines, width, size);
+        let inferred = matched.is_some() && p.sizes[0] != size;
         // Reassemble bytes: in 4-bit mode each clock carries a nibble,
         // DAT3 = MSB; in 1-bit mode DAT0 carries bytes MSB first.
-        let mut bytes = Vec::with_capacity(p.size);
-        for i in 0..p.size {
+        let mut bytes = Vec::with_capacity(size);
+        for i in 0..size {
             let mut b = 0u8;
             for k in 0..8 {
                 let bit = if width == 4 {
@@ -406,6 +453,7 @@ impl Sd {
             }
             bytes.push(b);
         }
+        let extra = if p.what == "lock/unlock data" { lock_data(&bytes) } else { String::new() };
         let preview: String = bytes.iter().take(16).map(|b| format!("{b:02x} ")).collect();
         let ascii: String = bytes.iter().take(16).map(|&b| if (0x20..0x7f).contains(&b) { b as char } else { '.' }).collect();
         let addr = if p.what.ends_with("block") {
@@ -421,16 +469,21 @@ impl Sd {
             start,
             end,
             format!(
-                "{}{addr}: {} B, {}-bit, CRC {}{} · {preview}|{ascii}|",
+                "{}{addr}: {} B{}, {}-bit, CRC {}{}{extra} · {preview}|{ascii}|",
                 p.what,
-                p.size,
+                size,
+                if inferred { " (size from CRC)" } else { "" },
                 width,
                 if crc_ok { "ok" } else { "ERROR" },
                 if end_ok { "" } else { ", bad end bit" },
             ),
         );
+        // Later blocks of the same transfer have the size that checked out.
+        if matched.is_some() {
+            p.sizes = vec![size];
+        }
         // Next block, if any.
-        let step = if self.sdhc == Some(true) { 1 } else { p.size as u32 };
+        let step = if self.sdhc == Some(true) { 1 } else { size as u32 };
         let next = Pending { addr: p.addr.wrapping_add(step), left: p.left.map(|n| n.saturating_sub(1)), ..p.clone() };
         self.pending = (next.left != Some(0)).then_some(next);
         self.dat = if p.dir == Dir::Write { DatState::CrcStatus { bits: Vec::new(), start: end } } else { DatState::Idle };
@@ -463,6 +516,65 @@ impl Decoder for Sd {
         self.cmd_bit(Self::line(s, self.cfg.cmd), t.at, out);
         self.dat_clock(s, t.at, out);
     }
+}
+
+/// Clocks a `size`-byte block takes on a `width`-bit bus: data, CRC16, end bit.
+fn clocks_for(size: usize, width: usize) -> usize {
+    size * 8 / width + 16 + 1
+}
+
+/// Checks a block of `size` bytes: (every line's CRC16 matches, end bits high).
+fn block_ok(lines: &[Vec<bool>], width: usize, size: usize) -> (bool, bool) {
+    let data = size * 8 / width;
+    if lines.iter().any(|l| l.len() < data + 17) {
+        return (false, false);
+    }
+    let crc = lines.iter().all(|l| crc16(&l[..data]) == field(&l[data..], 0, 16) as u16);
+    (crc, lines.iter().all(|l| l[data + 16]))
+}
+
+fn dedup(mut v: Vec<usize>) -> Vec<usize> {
+    let mut seen = Vec::new();
+    v.retain(|x| {
+        let new = !seen.contains(x);
+        seen.push(*x);
+        new
+    });
+    v
+}
+
+/// Describes a CMD42 lock/unlock data block.
+fn lock_data(b: &[u8]) -> String {
+    if b.is_empty() {
+        return String::new();
+    }
+    let f = b[0];
+    let mut ops = Vec::new();
+    if f & 0x08 != 0 {
+        ops.push("ERASE (forced)");
+    }
+    if f & 0x04 != 0 {
+        ops.push("LOCK");
+    } else if f & 0x08 == 0 {
+        ops.push("UNLOCK");
+    }
+    if f & 0x02 != 0 {
+        ops.push("CLR_PWD");
+    }
+    if f & 0x01 != 0 {
+        ops.push("SET_PWD");
+    }
+    let mut s = format!(", {}", ops.join(" + "));
+    if let Some(&len) = b.get(1) {
+        let pwd = &b[2..(2 + len as usize).min(b.len())];
+        let text = if pwd.iter().all(|c| c.is_ascii_graphic() || *c == b' ') {
+            format!("'{}'", String::from_utf8_lossy(pwd))
+        } else {
+            pwd.iter().map(|c| format!("{c:02x}")).collect::<String>()
+        };
+        s += &format!(", password ({len} bytes) {text}");
+    }
+    s
 }
 
 /// Reads `n` bits MSB-first from `bits[at..]`.
@@ -969,6 +1081,110 @@ pub(crate) mod tests {
         assert_eq!(t[5], "CMD12 STOP_TRANSMISSION");
         assert!(t[6].starts_with("R1b (CMD12) status 0x00000b00 state=data"), "{t:#?}");
         assert_eq!(t.len(), 7, "{t:#?}");
+    }
+
+    fn texts(out: Vec<Annotation>) -> Vec<String> {
+        out.into_iter()
+            .filter_map(|a| match a.event {
+                Event::Protocol { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn decode(bus: &Bus, d: &mut Sd) -> Vec<String> {
+        d.init(0b11_1110);
+        let mut out = Vec::new();
+        for t in &bus.tr {
+            d.transition(t, &mut out);
+        }
+        texts(out)
+    }
+
+    fn cmd_r1(bus: &mut Bus, idx: u8, arg: u32, status: u32) {
+        bus.command(idx, arg, true);
+        bus.idle(2);
+        bus.command(idx, status, false);
+        bus.idle(4);
+    }
+
+    fn lock_block(pwd: &[u8], flags: u8) -> Vec<u8> {
+        let mut b = vec![flags, pwd.len() as u8];
+        b.extend_from_slice(pwd);
+        b
+    }
+
+    #[test]
+    fn cmd42_password_block_with_cmd16() {
+        // SDHC card, 4-bit: CMD16 18, CMD42 (set password + lock), then
+        // CMD16 512 and a normal read.
+        let mut bus = Bus::new();
+        bus.idle(4);
+        cmd_r1(&mut bus, 16, 18, 0x900);
+        bus.command(42, 0, true);
+        bus.idle(2);
+        bus.command(42, 0x900, false);
+        bus.idle(4);
+        bus.block4(&lock_block(b"0123456789abcdef", 0x05));
+        bus.crc_status(0b010, 10);
+        cmd_r1(&mut bus, 16, 512, 0x900);
+        cmd_r1(&mut bus, 17, 7, 0x2000900); // R1 with CARD_IS_LOCKED, still reads in this test
+        bus.block4(&[0x42; 512]);
+        bus.idle(4);
+        let mut d = Sd::new(cfg4(), 10_000_000);
+        d.sdhc = Some(true);
+        d.bus4 = Some(true);
+        let t = decode(&bus, &mut d);
+        let lock = t.iter().find(|s| s.starts_with("lock/unlock data")).expect("lock block");
+        assert!(
+            lock.starts_with("lock/unlock data: 18 B, 4-bit, CRC ok, LOCK + SET_PWD, password (16 bytes) '0123456789abcdef'"),
+            "{t:#?}"
+        );
+        assert!(t.iter().any(|s| s == "write CRC status 010: data accepted"));
+        assert!(t.iter().any(|s| s.starts_with("read block 7: 512 B, 4-bit, CRC ok · 42 42")), "{t:#?}");
+    }
+
+    #[test]
+    fn cmd42_size_inferred_without_cmd16() {
+        // Capture starts after CMD16: the decoder still assumes 512.
+        let mut bus = Bus::new();
+        bus.idle(4);
+        bus.command(42, 0, true);
+        bus.idle(2);
+        bus.command(42, 0x900, false);
+        bus.idle(4);
+        bus.block4(&lock_block(b"secret", 0x00)); // unlock, 8 bytes
+        bus.crc_status(0b010, 5);
+        let mut d = Sd::new(cfg4(), 10_000_000);
+        d.bus4 = Some(true);
+        let t = decode(&bus, &mut d);
+        assert!(
+            t.iter().any(|s| s.starts_with("lock/unlock data: 8 B (size from CRC), 4-bit, CRC ok, UNLOCK, password (6 bytes) 'secret'")),
+            "{t:#?}"
+        );
+        assert!(t.iter().any(|s| s == "write CRC status 010: data accepted"), "{t:#?}");
+    }
+
+    #[test]
+    fn one_bit_cmd42_and_rejected_cmd16() {
+        let mut bus = Bus::new();
+        bus.idle(4);
+        cmd_r1(&mut bus, 16, 18, 0x900);
+        // A rejected CMD16 (BLOCK_LEN_ERROR) must not change the length.
+        cmd_r1(&mut bus, 16, 3000, 0x2000_0900);
+        bus.command(42, 0, true);
+        bus.idle(2);
+        bus.command(42, 0x900, false);
+        bus.idle(4);
+        bus.block1(&lock_block(b"0123456789abcdef", 0x02)); // clear password
+        bus.crc_status(0b010, 5);
+        let mut d = Sd::new(SdConfig { clk: 0, cmd: 1, dat: [Some(2), None, None, None] }, 10_000_000);
+        let t = decode(&bus, &mut d);
+        assert!(
+            t.iter().any(|s| s.starts_with("lock/unlock data: 18 B, 1-bit, CRC ok, UNLOCK + CLR_PWD, password (16 bytes)")),
+            "{t:#?}"
+        );
+        assert_eq!(d.block_len, 18);
     }
 
     #[test]
