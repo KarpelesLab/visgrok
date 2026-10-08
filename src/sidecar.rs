@@ -18,7 +18,7 @@
 //!     {"name": "SCLK", "role": "spi-clk"}
 //!   ],
 //!   "decoders": {"spi_protocol": "ssd1306", "spi_mode": null, "spi_cs_active_high": false,
-//!                "uart_format": "auto", "uart_follow": true},
+//!                "uart_format": "auto", "uart_follow": true, "uart_protocol": "raw"},
 //!   "recording": {"device": "SLogic16 U3", "samplerate": 200000000, "threshold_v": 1.65},
 //!   "bookmarks": [{"sample": 1031000000, "label": "CMD42"}],
 //!   "notes": "head unit boot, card in slot 1"
@@ -32,7 +32,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::analyzer::{DecoderOptions, SpiProtocol, parse_uart_format, uart_format_id};
+use crate::analyzer::{DecoderOptions, SpiProtocol, UartProtocol, parse_uart_format, uart_format_id};
 use crate::json::{Json, Obj, jstr};
 use crate::roles::Role;
 
@@ -125,6 +125,9 @@ impl Sidecar {
                 o.uart_format = f;
             }
             o.uart_auto = d.get("uart_follow").and_then(Json::bool).unwrap_or(true);
+            if let Some(p) = d.get("uart_protocol").and_then(Json::str).and_then(|p| UartProtocol::parse(p).ok()) {
+                o.uart_protocol = p;
+            }
         }
         if let Some(r) = j.get("recording") {
             s.device = r.get("device").and_then(Json::str).map(str::to_string);
@@ -163,6 +166,7 @@ impl Sidecar {
         d.bool("spi_cs_active_high", o.spi_cs_active_high);
         d.str("uart_format", &uart_format_id(o.uart_format));
         d.bool("uart_follow", o.uart_auto);
+        d.str("uart_protocol", o.uart_protocol.id());
         let mut r = Obj::new();
         if let Some(dev) = &self.device {
             r.str("device", dev);

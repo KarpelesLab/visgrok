@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use visgrok::Source;
-use visgrok::analyzer::{DecoderOptions, SpiProtocol, parse_uart_format};
+use visgrok::analyzer::{DecoderOptions, SpiProtocol, UartProtocol, parse_uart_format};
 use visgrok::formats::{Format, ReadOptions, WriteOptions};
 use visgrok::roles::{Role, fmt_hz};
 use visgrok::sidecar::Sidecar;
@@ -94,6 +94,9 @@ pub struct Args {
     /// 7E1, ... to force one.
     #[arg(long, default_value = "auto")]
     uart_format: String,
+    /// Protocol on top of UART: raw, iso7816 (smart card: ATR, PPS, T=1).
+    #[arg(long, default_value = "raw", value_parser = UartProtocol::parse)]
+    uart_proto: UartProtocol,
     /// Keep UART rates given with --role fixed instead of following changes.
     #[arg(long)]
     uart_fixed: bool,
@@ -336,6 +339,7 @@ fn main() {
         spi_cs_active_high: args.spi_cs_high,
         spi_protocol: args.spi_proto,
         uart_auto: !args.uart_fixed,
+        uart_protocol: args.uart_proto,
         uart_format: match parse_uart_format(&args.uart_format) {
             Ok(f) => f,
             Err(e) => {

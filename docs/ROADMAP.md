@@ -96,6 +96,11 @@ Status legend: ✅ done · 🚧 in progress · ⬜ planned
 - ⬜ Export decoded events (text/CSV/JSON) alongside the `.sr` file.
 
 ## Phase 4: more analysis
+- ✅ ISO 7816-3 layer over UART (`--uart-proto iso7816`): ATR (convention,
+  TA/TB/TC/TD, Fi/Di, protocols, historical bytes, TCK), PPS request/response
+  with PCK and acceptance, frames grouped by idle time, T=1 I/R/S blocks.
+- ✅ Web UI: display state at any moment (SSD1306 snapshots), cursor levels,
+  Δt marker.
 - ⬜ More decoders: SD over SPI, 1-Wire, CAN, I2S, JTAG/SWD, PWM/servo measurement.
 - ⬜ Analysis on a parallel thread pool for very high rates.
 - ⬜ Glitch detection (pulses below a threshold), frequency drift tracking.

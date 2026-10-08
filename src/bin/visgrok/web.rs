@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use visgrok::Source;
-use visgrok::analyzer::{Analyzer, DecoderOptions, SpiProtocol, parse_uart_format};
+use visgrok::analyzer::{Analyzer, DecoderOptions, SpiProtocol, UartProtocol, parse_uart_format};
 use visgrok::json::{Json, Obj, jstr};
 use visgrok::roles::{Role, Suggestion, fmt_hz};
 use visgrok::sidecar::{Bookmark, Sidecar};
@@ -452,7 +452,16 @@ impl Session {
                 .collect();
             o.raw("chans", &format!("[{}]", chans.join(",")));
         }
-        let spi = self.options.lock().unwrap().spi_protocol;
+        let (spi, uart_fmt, uart_proto) = {
+            let o = self.options.lock().unwrap();
+            (
+                o.spi_protocol,
+                visgrok::analyzer::uart_format_id(o.uart_format),
+                o.uart_protocol.id(),
+            )
+        };
+        o.str("uartFormat", &uart_fmt);
+        o.str("uartProto", uart_proto);
         o.str(
             "spiProto",
             match spi {
@@ -573,6 +582,9 @@ impl Session {
                     }
                     if let Some(f) = msg.get("uartFormat").and_then(Json::str).and_then(|f| parse_uart_format(f).ok()) {
                         o.uart_format = f;
+                    }
+                    if let Some(p) = msg.get("uartProto").and_then(Json::str).and_then(|p| UartProtocol::parse(p).ok()) {
+                        o.uart_protocol = p;
                     }
                 }
                 self.apply_roles();

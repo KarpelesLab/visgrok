@@ -78,7 +78,7 @@ footer { display: grid; grid-template-columns: 1fr; border-top: 1px solid var(--
   </div>
   <div class="group">
     <label>SPI</label><select id="spiproto"><option value="raw">raw</option><option value="ssd1306">SSD1306 128×64</option><option value="ssd1306:128x32">SSD1306 128×32</option></select>
-    <label>UART</label><select id="uartfmt"><option value="auto">auto</option><option>8N1</option><option>8E1</option><option>8E2</option><option>8O1</option><option>7E1</option></select>
+    <label>UART</label><select id="uartproto" title="Protocol on the UART"><option value="raw">bytes</option><option value="iso7816">ISO 7816</option></select><select id="uartfmt"><option value="auto">auto</option><option>8N1</option><option>8E1</option><option>8E2</option><option>8O1</option><option>7E1</option></select>
   </div>
   <div class="group">
     <select id="marks" title="Bookmarks (b: add at cursor, B: remove nearest)"><option value="">Bookmarks…</option></select>
@@ -184,6 +184,8 @@ function onStatus(m) {
   if (chChanged || modeChanged) buildChannels();
   else updateChannels();
   $("spiproto").value = m.spiProto || "raw";
+  if (document.activeElement !== $("uartfmt")) $("uartfmt").value = m.uartFormat || "auto";
+  if (document.activeElement !== $("uartproto")) $("uartproto").value = m.uartProto || "raw";
   renderMarks();
   $("buses").textContent = (m.buses || []).join("  ·  ");
   $("buses").title = m.sidecar ? "Saved in " + m.sidecar : "";
@@ -290,7 +292,7 @@ function sendRoles() {
   const scl = roles.indexOf("i2c-scl"), sda = roles.indexOf("i2c-sda");
   if (scl >= 0) roles[scl] = "i2c-scl:" + (sda >= 0 ? sda : scl + 1);
   if (sda >= 0) roles[sda] = "i2c-sda:" + (scl >= 0 ? scl : Math.max(0, sda - 1));
-  send({ cmd: "roles", roles, spiProto: $("spiproto").value, uartFormat: $("uartfmt").value });
+  send({ cmd: "roles", roles, spiProto: $("spiproto").value, uartFormat: $("uartfmt").value, uartProto: $("uartproto").value });
   dirty.events = true;
 }
 
@@ -311,6 +313,7 @@ $("files").onchange = (e) => { if (e.target.value) { send({ cmd: "open", file: e
 $("files").onfocus = () => send({ cmd: "files" });
 $("spiproto").onchange = sendRoles;
 $("uartfmt").onchange = sendRoles;
+$("uartproto").onchange = sendRoles;
 $("follow").onclick = () => goLive();
 $("fit").onclick = () => fitAll();
 

@@ -5,6 +5,7 @@ use std::collections::VecDeque;
 
 use crate::block::Block;
 use crate::decode::i2c::I2c;
+use crate::decode::iso7816::Iso7816;
 use crate::decode::sd::{Sd, SdConfig};
 use crate::decode::spi::{Spi, SpiConfig};
 use crate::decode::ssd1306::Ssd1306;
@@ -63,6 +64,35 @@ impl SpiProtocol {
     }
 }
 
+/// Higher-level protocol carried over UART.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum UartProtocol {
+    /// Plain bytes.
+    #[default]
+    Raw,
+    /// ISO 7816-3 smart card (ATR, PPS, T=1 blocks).
+    Iso7816,
+}
+
+impl UartProtocol {
+    /// Parses `raw` or `iso7816`.
+    pub fn parse(s: &str) -> Result<UartProtocol, String> {
+        match s.to_ascii_lowercase().as_str() {
+            "raw" | "none" | "uart" => Ok(UartProtocol::Raw),
+            "iso7816" | "iso-7816" | "smartcard" | "sim" => Ok(UartProtocol::Iso7816),
+            _ => Err(format!("unknown UART protocol {s:?} (raw, iso7816)")),
+        }
+    }
+
+    /// Text form accepted by [`UartProtocol::parse`].
+    pub fn id(&self) -> &'static str {
+        match self {
+            UartProtocol::Raw => "raw",
+            UartProtocol::Iso7816 => "iso7816",
+        }
+    }
+}
+
 /// Settings applied when building decoders from roles.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DecoderOptions {
@@ -76,6 +106,8 @@ pub struct DecoderOptions {
     pub uart_auto: bool,
     /// UART frame format (data bits, parity, stop bits); `None` detects it.
     pub uart_format: Option<(u8, Parity, u8)>,
+    /// Protocol layered on UART.
+    pub uart_protocol: UartProtocol,
 }
 
 /// Text form of a UART frame format (`auto` for `None`), accepted by
@@ -126,6 +158,7 @@ impl Default for DecoderOptions {
             spi_protocol: SpiProtocol::Raw,
             uart_auto: true,
             uart_format: None,
+            uart_protocol: UartProtocol::Raw,
         }
     }
 }
@@ -254,7 +287,10 @@ impl Analyzer {
                         cfg.stop_bits = stop;
                         cfg.auto_format = false;
                     }
-                    out.push(Box::new(Uart::new(cfg, self.samplerate)))
+                    match opts.uart_protocol {
+                        UartProtocol::Raw => out.push(Box::new(Uart::new(cfg, self.samplerate))),
+                        UartProtocol::Iso7816 => out.push(Box::new(Iso7816::new(cfg, self.samplerate))),
+                    }
                 }
                 Role::I2cScl { sda } => out.push(Box::new(I2c::new(i as u8, *sda))),
                 Role::SdClk => {
