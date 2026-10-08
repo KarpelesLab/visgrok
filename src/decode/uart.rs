@@ -119,6 +119,57 @@ enum Detect {
     Found(u8, Parity, u8),
 }
 
+/// Estimates the bit time (in samples) of an asynchronous serial line from
+/// consecutive pulse widths (alternating high/low, oldest first). Pulses
+/// longer than `max_bits` bit times (idle gaps) are ignored.
+///
+/// Works on sums of adjacent pulses rather than single pulses: on a real line
+/// slow edges make every high pulse longer and every low pulse shorter by the
+/// same amount (e.g. 112 and 88 samples for 100-sample bits), so single
+/// widths fit no bit time, but each high+low pair is an exact multiple.
+pub fn estimate_bit_time(widths: &[u64], max_bits: f64) -> Option<f64> {
+    if widths.len() < 3 {
+        return None;
+    }
+    let pairs: Vec<u64> = widths.windows(2).map(|w| w[0] + w[1]).collect();
+    let mut sorted = pairs.clone();
+    sorted.sort_unstable();
+    // Shortest pair sum that has company (rejects isolated oddities).
+    let base = sorted
+        .iter()
+        .copied()
+        .find(|&p| sorted.iter().filter(|&&x| x * 4 >= p * 3 && x * 4 <= p * 5).count() >= 2)
+        .unwrap_or(sorted[0])
+        .max(2) as f64;
+    // That pair is normally two one-bit pulses; it can be three bits when the
+    // traffic has no isolated single bits. Keep whichever fits better.
+    let mut best: Option<(f64, f64)> = None;
+    for k0 in [2.0, 3.0] {
+        let t0 = base / k0;
+        let (mut sum, mut bits, mut fit, mut total) = (0.0, 0.0, 0usize, 0usize);
+        for &p in &pairs {
+            let r = p as f64 / t0;
+            if r > 2.0 * max_bits + 0.5 {
+                continue;
+            }
+            total += 1;
+            let k = r.round().max(2.0);
+            if (r - k).abs() < 0.25 {
+                fit += 1;
+                sum += p as f64;
+                bits += k;
+            }
+        }
+        if total >= 3 && fit * 5 >= total * 4 {
+            let ratio = fit as f64 / total as f64;
+            if best.is_none_or(|(r, _)| ratio > r + 0.02) {
+                best = Some((ratio, sum / bits));
+            }
+        }
+    }
+    best.map(|(_, t)| t)
+}
+
 /// Result of decoding one frame.
 struct Frame {
     value: u16,
@@ -215,31 +266,8 @@ impl Uart {
         if widths.len() < if settled || complete { 4 } else { 12 } {
             return (None, edges, complete);
         }
-        let mut sorted = widths.clone();
-        sorted.sort_unstable();
-        // Smallest width that has company (rejects isolated glitches).
-        let unit0 = sorted
-            .iter()
-            .copied()
-            .find(|&w| sorted.iter().filter(|&&x| x * 4 >= w * 3 && x * 4 <= w * 5).count() >= 2)
-            .unwrap_or(sorted[0])
-            .max(1) as f64;
         let max_run = (self.frame_bits() + 1) as f64;
-        let (mut sum, mut bits, mut fit, mut total) = (0.0, 0.0, 0, 0);
-        for &w in &widths {
-            let r = w as f64 / unit0;
-            if r > max_run + 0.5 {
-                continue; // inter-frame idle
-            }
-            total += 1;
-            let k = r.round().max(1.0);
-            if (r - k).abs() < 0.25 {
-                fit += 1;
-                sum += w as f64;
-                bits += k;
-            }
-        }
-        ((total >= 4 && fit * 5 >= total * 4).then(|| sum / bits), edges, complete)
+        (estimate_bit_time(&widths, max_run), edges, complete)
     }
 
     /// Decodes the frame starting at `edges[i]` with `bit` samples per bit.

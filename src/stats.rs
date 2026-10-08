@@ -102,6 +102,12 @@ impl ChannelStats {
         &self.widths
     }
 
+    /// Recent pulse widths in the order they happened (oldest first).
+    pub fn recent_widths_ordered(&self) -> Vec<u64> {
+        let (a, b) = self.widths.split_at(self.width_pos.min(self.widths.len()));
+        b.iter().chain(a).copied().collect()
+    }
+
     fn edge(&mut self, at: u64, rising: bool) {
         let since = at - self.accounted;
         if self.level {

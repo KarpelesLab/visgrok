@@ -125,15 +125,39 @@ pub struct Correlator {
     pub(crate) start: Vec<u64>,
     /// `stop[i][j]`: j rises while i is high and steady (I2C STOP-like).
     pub(crate) stop: Vec<u64>,
+    /// `burst[i][j]`: changes of j shortly after an edge of i (while i is
+    /// actively toggling), as opposed to during i's quiet gaps.
+    pub(crate) burst: Vec<u64>,
+    /// `high_at_rise[i][j]`: rising edges of i at which j is high.
+    pub(crate) high_at_rise: Vec<u64>,
+    /// Rising edges of each channel.
+    pub(crate) rises: Vec<u64>,
+    /// Last edge of each channel and its shortest interval between edges.
+    last_edge: Vec<Option<u64>>,
+    min_gap: Vec<u64>,
+    /// Edge intervals up to this many samples are glitches, not periods.
+    glitch: u64,
 }
 
 impl Correlator {
     /// Creates counters for `n` channels.
     pub fn new(n: usize) -> Correlator {
+        Correlator::with_glitch(n, 0)
+    }
+
+    /// Like [`Correlator::new`], ignoring edge intervals of up to `glitch`
+    /// samples when measuring each channel's shortest period.
+    pub fn with_glitch(n: usize, glitch: u64) -> Correlator {
         let z = vec![0; n * n];
         Correlator {
             n,
             state: 0,
+            burst: z.clone(),
+            high_at_rise: z.clone(),
+            rises: vec![0; n],
+            last_edge: vec![None; n],
+            min_gap: vec![u64::MAX; n],
+            glitch,
             hi: z.clone(),
             lo: z.clone(),
             start: z.clone(),
@@ -161,6 +185,15 @@ impl Correlator {
                 }
                 let rising = t.now >> j & 1 != 0;
                 for i in 0..n {
+                    // Burst membership: j moved within a few of i's
+                    // shortest edge-to-edge intervals after i's last edge.
+                    if i != j
+                        && let Some(le) = self.last_edge[i]
+                        && self.min_gap[i] != u64::MAX
+                        && t.at - le <= 4 * self.min_gap[i]
+                    {
+                        self.burst[i * n + j] += 1;
+                    }
                     if i == j || steady >> i & 1 == 0 {
                         continue;
                     }
@@ -173,6 +206,29 @@ impl Correlator {
                         }
                     } else {
                         self.lo[i * n + j] += 1;
+                    }
+                }
+            }
+            // Per-channel edge bookkeeping, after the pair counts above.
+            let mut c = changed;
+            while c != 0 {
+                let i = c.trailing_zeros() as usize;
+                c &= c - 1;
+                if i >= n {
+                    continue;
+                }
+                if let Some(le) = self.last_edge[i]
+                    && t.at - le > self.glitch
+                {
+                    self.min_gap[i] = self.min_gap[i].min(t.at - le);
+                }
+                self.last_edge[i] = Some(t.at);
+                if t.now >> i & 1 != 0 {
+                    self.rises[i] += 1;
+                    for j in 0..n {
+                        if j != i && t.now >> j & 1 != 0 {
+                            self.high_at_rise[i * n + j] += 1;
+                        }
                     }
                 }
             }
@@ -195,46 +251,39 @@ pub fn snap_baud(measured: f64) -> Option<u32> {
 }
 
 fn uart_score(c: &ChannelStats, samplerate: u64) -> Option<Suggestion> {
-    let w = c.recent_widths();
+    // Pulses under 25 ns are glitches (as in the UART decoder), not bits. A
+    // glitch splits a pulse in two: merge the pieces back into one.
+    let glitch = (samplerate as f64 * 25e-9) as u64;
+    let mut w: Vec<u64> = Vec::new();
+    let mut merge_next = false;
+    for x in c.recent_widths_ordered() {
+        if x <= glitch {
+            if let Some(last) = w.last_mut() {
+                *last += x;
+                merge_next = true;
+            }
+        } else if merge_next {
+            *w.last_mut().unwrap() += x;
+            merge_next = false;
+        } else {
+            w.push(x);
+        }
+    }
+    let w = &w[..];
     if w.len() < 20 || c.duty()? < 0.5 || !c.level && c.edges() < 40 {
         return None;
     }
-    // The shortest pulse is (usually) one bit; reject outliers by taking the
-    // 5th percentile.
-    let mut sorted = w.to_vec();
-    sorted.sort_unstable();
-    let unit = sorted[sorted.len() / 20].max(1) as f64;
-    // Pulses within a frame are integer multiples of the bit time; gaps
-    // between frames can be anything, so only score pulses up to 10 bits.
-    let mut good = 0;
-    let mut total = 0;
-    for &x in w {
-        let r = x as f64 / unit;
-        if r <= 10.5 {
-            total += 1;
-            if (r - r.round()).abs() < 0.2 {
-                good += 1;
-            }
-        }
-    }
-    if total < 16 {
+    // Bit time from high+low pulse pairs (robust to slow edges, see
+    // estimate_bit_time); traffic must fit it, and bits must be resolvable.
+    let bit = crate::decode::uart::estimate_bit_time(w, 10.0)?;
+    if bit < 4.0 {
         return None;
     }
-    let fit = good as f64 / total as f64;
-    // Refine the bit time using all pulses that are clean multiples.
-    let (sum, bits) = w.iter().fold((0.0, 0.0), |(s, b), &x| {
-        let r = (x as f64 / unit).round();
-        if (1.0..=10.0).contains(&r) && (x as f64 / unit - r).abs() < 0.2 {
-            (s + x as f64, b + r)
-        } else {
-            (s, b)
-        }
-    });
-    let measured = samplerate as f64 * bits / sum;
+    let measured = samplerate as f64 / bit;
     let baud = snap_baud(measured).unwrap_or_else(|| crate::decode::uart::nice_baud(measured));
-    (fit > 0.85).then_some(Suggestion {
+    Some(Suggestion {
         role: Role::Uart { baud },
-        confidence: fit * 0.9,
+        confidence: 0.8,
     })
 }
 
@@ -359,14 +408,29 @@ pub fn detect(stats: &Stats, corr: &Correlator, samplerate: u64) -> Vec<Suggesti
             role: Role::SpiClk,
             confidence: 0.6,
         };
+        // Data lines change during clock bursts; CS and D/C only in the gaps
+        // between them. CS then has one level at every clock edge (its active
+        // level); D/C differs between command and data bytes.
+        let rises = corr.rises[clk].max(1) as f64;
+        let mut mosi_done = false;
         for d in data {
             used[d] = true;
-            // CS toggles rarely compared to data.
-            let is_cs = stats.channels[d].edges() * 16 < ce && stats.channels[d].duty().unwrap_or(0.0) > 0.5;
-            out[d] = Suggestion {
-                role: if is_cs { Role::SpiCs } else { Role::SpiData { clk: clk as u8 } },
-                confidence: 0.5,
+            let changes = stats.channels[d].edges().max(1) as f64;
+            let in_burst = corr.get(&corr.burst, clk, d) as f64 / changes;
+            let high = corr.get(&corr.high_at_rise, clk, d) as f64 / rises;
+            let role = if in_burst > 0.5 {
+                if mosi_done {
+                    Role::SpiMiso
+                } else {
+                    mosi_done = true;
+                    Role::SpiMosi
+                }
+            } else if !(0.02..=0.98).contains(&high) {
+                Role::SpiCs
+            } else {
+                Role::SpiDc
             };
+            out[d] = Suggestion { role, confidence: 0.55 };
         }
     }
 

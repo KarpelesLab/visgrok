@@ -104,7 +104,13 @@ impl Ssd1306 {
         }
     }
 
-    fn data(&mut self, byte: u8, start: u64, end: u64) {
+    fn data(&mut self, byte: u8, start: u64, end: u64, out: &mut Vec<Annotation>) {
+        // A long pause also ends a run (separate screen updates).
+        if let Some(r) = &self.run
+            && start.saturating_sub(r.4) > 64 * (r.4 - r.0) / r.1.max(1)
+        {
+            self.flush_run(out);
+        }
         match &mut self.run {
             Some(r) => {
                 r.1 += 1;
@@ -143,6 +149,11 @@ impl Ssd1306 {
                 }
             }
         }
+    }
+
+    /// Finishes any pending write run (e.g. at the end of a capture).
+    pub fn flush(&mut self, out: &mut Vec<Annotation>) {
+        self.flush_run(out);
     }
 
     /// Number of argument bytes that follow a command byte.
@@ -236,6 +247,7 @@ impl Ssd1306 {
             0xda => format!("COM pins config {:#04x}", a[0]),
             0xdb => format!("VCOMH deselect level {:#04x}", a[0]),
             0xe3 => "NOP".into(),
+            0xd8 => "vendor command 0xd8 (area color / low power mode on some controllers)".into(),
             _ => format!("unknown command {c:#04x}"),
         }
     }
@@ -246,7 +258,7 @@ impl Ssd1306 {
                 Self::note(out, start, end, "data byte while command arguments were expected".into());
                 self.cmd = None;
             }
-            self.data(b, start, end);
+            self.data(b, start, end, out);
             return;
         }
         self.flush_run(out);
@@ -301,24 +313,35 @@ impl Decoder for Ssd1306 {
                     };
                     self.byte(b, dc, a.start, a.end, out);
                 }
-                Event::SpiSelect(false) => self.flush_run(out),
+                // Many hosts toggle CS around every byte: keep the write run
+                // going; commands (and address jumps) end it.
+                Event::SpiSelect(false) => {}
                 _ => {}
             }
         }
         self.scratch = events;
     }
 
+    fn advance(&mut self, to: u64, out: &mut Vec<Annotation>) {
+        // End a write run once the bus has been quiet for a while.
+        if let Some(r) = &self.run
+            && to.saturating_sub(r.4) > 64 * (r.4 - r.0) / r.1.max(1) + 1000
+        {
+            self.flush_run(out);
+        }
+    }
+
     fn display(&self) -> Option<DisplayView> {
         let pages = self.pages();
         let mut pixels = vec![false; self.width * self.height];
         for y in 0..self.height {
-            // Most modules are wired so that segment remap (A1) and COM
-            // remap (C8) give an upright image of RAM; render relative to
-            // that and mirror only when the remaps are off.
+            // Segment/COM remaps (A0/A1, C0/C8) only compensate for how the
+            // glass is mounted: hosts draw RAM upright for their panel, so
+            // RAM is shown as is (with the start line and inversion).
             let ry = (y + self.start_line) % (pages * 8);
-            let sy = if self.com_flip { y } else { self.height - 1 - y };
+            let sy = y;
             for x in 0..self.width {
-                let rx = if self.seg_remap { x } else { self.width - 1 - x };
+                let rx = x;
                 let on = self.ram[(ry / 8) * self.width + rx] >> (ry % 8) & 1 != 0;
                 pixels[sy * self.width + x] = on ^ self.inverted;
             }
@@ -363,6 +386,7 @@ mod tests {
         for t in &bus.tr {
             d.transition(t, &mut out);
         }
+        d.advance(bus.at + 1_000_000, &mut out); // end of capture ends the run
         let texts: Vec<String> = out
             .iter()
             .filter_map(|a| match &a.event {

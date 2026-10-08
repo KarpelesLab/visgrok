@@ -172,7 +172,7 @@ impl Analyzer {
             edges: EdgeDetector::new(mask),
             scratch: Vec::new(),
             stats: Stats::new(channels),
-            corr: Correlator::new(channels),
+            corr: Correlator::with_glitch(channels, (samplerate as f64 * 25e-9) as u64),
             decoders: Vec::new(),
             ann_scratch: Vec::new(),
             annotations: VecDeque::new(),
@@ -297,7 +297,7 @@ impl Analyzer {
     /// Forgets statistics (but keeps decoders), e.g. after the signals changed.
     pub fn reset_stats(&mut self) {
         self.stats = Stats::new(self.channels);
-        self.corr = Correlator::new(self.channels);
+        self.corr = Correlator::with_glitch(self.channels, (self.samplerate as f64 * 25e-9) as u64);
         if let Some(s) = self.edges.state() {
             self.stats.init(s);
             self.corr.init(s);
