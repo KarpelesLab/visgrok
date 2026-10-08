@@ -25,6 +25,10 @@ Status legend: ✅ done · 🚧 in progress · ⬜ planned
   pauses without CS; SSD1306 layer: full command decoding, RAM pointer tracking
   in all addressing modes, live framebuffer rendered in the TUI (braille).
 - ✅ `--demo device`: synthetic UART negotiation + SSD1306 for testing.
+- ✅ SD card bus decoder (CLK/CMD/DAT0-3): commands, R1/R1b/R2/R3/R6/R7
+  responses (status flags and state, CID, CSD capacity, OCR), data blocks in
+  1-/4-bit mode with CRC16, write CRC status and busy; data expected only after
+  data commands so busy isn't misread. SD-over-SPI not yet.
 - ✅ Streaming sigrok `.sr` writer (stored zip, Zip64 for large captures),
   verified with `sigrok-cli`.
 - ✅ Synthetic source for development without hardware.
@@ -72,6 +76,6 @@ Status legend: ✅ done · 🚧 in progress · ⬜ planned
 - ⬜ Export decoded events (text/CSV/JSON) alongside the `.sr` file.
 
 ## Phase 4: more analysis
-- ⬜ More decoders: 1-Wire, CAN, I2S, JTAG/SWD, PWM/servo measurement.
+- ⬜ More decoders: SD over SPI, 1-Wire, CAN, I2S, JTAG/SWD, PWM/servo measurement.
 - ⬜ Analysis on a parallel thread pool for very high rates.
 - ⬜ Glitch detection (pulses below a threshold), frequency drift tracking.

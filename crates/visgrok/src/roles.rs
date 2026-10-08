@@ -52,6 +52,12 @@ pub enum Role {
     SpiMiso,
     /// SPI data/command select (D/C, high = data), e.g. SSD1306 displays.
     SpiDc,
+    /// SD card bus clock.
+    SdClk,
+    /// SD card command line.
+    SdCmd,
+    /// SD card data line DAT0..DAT3.
+    SdDat(u8),
     /// Generic activity that matched nothing else.
     Data,
 }
@@ -72,6 +78,9 @@ impl fmt::Display for Role {
             Role::SpiMosi => write!(f, "SPI MOSI"),
             Role::SpiMiso => write!(f, "SPI MISO"),
             Role::SpiDc => write!(f, "SPI D/C"),
+            Role::SdClk => write!(f, "SD CLK"),
+            Role::SdCmd => write!(f, "SD CMD"),
+            Role::SdDat(n) => write!(f, "SD DAT{n}"),
             Role::Data => write!(f, "data"),
         }
     }
@@ -337,7 +346,7 @@ pub fn detect(stats: &Stats, corr: &Correlator, samplerate: u64) -> Vec<Suggesti
 impl Role {
     /// Parses a role name as used on the command line: `uart`, `uart:115200`,
     /// `spi-clk`, `spi-mosi`, `spi-miso`, `spi-cs`, `spi-dc`, `i2c-scl:SDA`,
-    /// `i2c-sda:SCL`, `idle`.
+    /// `i2c-sda:SCL`, `sd-clk`, `sd-cmd`, `sd-dat0`..`sd-dat3`, `idle`.
     pub fn parse(s: &str) -> Result<Role, String> {
         let (name, arg) = match s.split_once(':') {
             Some((n, a)) => (n, Some(a)),
@@ -355,6 +364,12 @@ impl Role {
             "spi-dc" | "spi-cd" | "dc" | "cd" => Role::SpiDc,
             "i2c-scl" | "scl" => Role::I2cScl { sda: num(arg)? as u8 },
             "i2c-sda" | "sda" => Role::I2cSda { scl: num(arg)? as u8 },
+            "sd-clk" | "sdclk" => Role::SdClk,
+            "sd-cmd" | "sdcmd" => Role::SdCmd,
+            "sd-dat0" | "sd-d0" => Role::SdDat(0),
+            "sd-dat1" | "sd-d1" => Role::SdDat(1),
+            "sd-dat2" | "sd-d2" => Role::SdDat(2),
+            "sd-dat3" | "sd-d3" => Role::SdDat(3),
             "idle" | "none" => Role::Idle,
             _ => return Err(format!("unknown role {name:?}")),
         })

@@ -45,7 +45,18 @@ visgrok --demo device -r 0=uart -r 1=spi-clk -r 2=spi-mosi -r 3=spi-dc -r 4=spi-
 ```
 
 Roles: `uart`, `uart:BAUD`, `spi-clk`, `spi-mosi`, `spi-miso`, `spi-cs`, `spi-dc`,
-`i2c-scl:SDA_CH`, `i2c-sda:SCL_CH`, `idle`. SPI options: `--spi-mode 0..3`
+`i2c-scl:SDA_CH`, `i2c-sda:SCL_CH`, `sd-clk`, `sd-cmd`, `sd-dat0`..`sd-dat3`, `idle`.
+
+SD cards (native SD bus): commands and responses by name with CRC7 checks
+(R1 status/state, CID, CSD capacity, OCR/SDHC, RCA), data blocks with per-line
+CRC16 in 1- or 4-bit mode, write CRC status tokens and busy times:
+
+```sh
+visgrok -c 8 -s 200M -r 0=sd-clk -r 1=sd-cmd -r 2=sd-dat0 -r 3=sd-dat1 -r 4=sd-dat2 -r 5=sd-dat3
+```
+
+Sample at least 4× the SD clock (default speed 25 MHz → 100 MHz or more;
+high speed 50 MHz → 200 MHz+). UHS-I SDR50/SDR104 clocks are too fast. SPI options: `--spi-mode 0..3`
 (default: polarity from the idle clock, CPHA 0), `--spi-cs-high`,
 `--spi-proto raw|ssd1306|ssd1306:128x32` (no D/C pin: 3-wire 9-bit mode).
 Pick a sample rate at least ~10× the fastest bit rate; decoding needs every

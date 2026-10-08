@@ -6,6 +6,7 @@ use std::collections::VecDeque;
 use crate::block::Block;
 use crate::decode::i2c::I2c;
 use crate::decode::spi::{Spi, SpiConfig};
+use crate::decode::sd::{Sd, SdConfig};
 use crate::decode::ssd1306::Ssd1306;
 use crate::decode::uart::{Parity, Uart, UartConfig};
 use crate::decode::{Annotation, Decoder};
@@ -231,6 +232,12 @@ impl Analyzer {
                     out.push(Box::new(Uart::new(cfg, self.samplerate)))
                 }
                 Role::I2cScl { sda } => out.push(Box::new(I2c::new(i as u8, *sda))),
+                Role::SdClk => {
+                    if let Some(cmd) = find(&Role::SdCmd) {
+                        let dat = [0u8, 1, 2, 3].map(|n| find(&Role::SdDat(n)));
+                        out.push(Box::new(Sd::new(SdConfig { clk: i as u8, cmd, dat }, self.samplerate)));
+                    }
+                }
                 Role::SpiClk => {
                     // Explicit MOSI/MISO roles win; otherwise use auto-detected
                     // data lines on this clock (first one as MOSI).

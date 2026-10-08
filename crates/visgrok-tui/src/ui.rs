@@ -69,6 +69,12 @@ const PICKS: &[&str] = &[
     "SPI D/C (data/command)",
     "I2C SCL",
     "I2C SDA",
+    "SD CLK",
+    "SD CMD",
+    "SD DAT0",
+    "SD DAT1",
+    "SD DAT2",
+    "SD DAT3",
     "idle (ignore)",
 ];
 
@@ -89,7 +95,10 @@ fn pick_role(i: usize, ch: usize, roles: &[Option<Role>]) -> Option<Role> {
             let scl = find(&|r| matches!(r, Role::I2cScl { .. })).unwrap_or(ch.saturating_sub(1));
             Some(Role::I2cSda { scl: scl as u8 })
         }
-        9 => Some(Role::Idle),
+        9 => Some(Role::SdClk),
+        10 => Some(Role::SdCmd),
+        11..=14 => Some(Role::SdDat(i as u8 - 11)),
+        15 => Some(Role::Idle),
         _ => None,
     }
 }
