@@ -83,6 +83,9 @@ pub enum Event {
         proto: &'static str,
         /// Human-readable description.
         text: String,
+        /// The bytes the event is about (a data block, an ATR, a screen
+        /// write...), for detailed views.
+        data: Option<std::sync::Arc<[u8]>>,
     },
 }
 

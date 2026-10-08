@@ -83,6 +83,8 @@ pub struct StoredEvent {
     pub channel: u8,
     /// Description.
     pub text: String,
+    /// The bytes the event is about, when the decoder provides them.
+    pub data: Option<Arc<[u8]>>,
 }
 
 struct Tiles {
@@ -501,6 +503,26 @@ impl SampleStore {
             .take(limit)
             .cloned()
             .collect()
+    }
+
+    /// The event starting at `start` on `channel` (the first one, if several),
+    /// with up to `context` events of the same decoder before and after it.
+    pub fn event_with_context(&self, start: u64, channel: u8, context: usize) -> Option<(StoredEvent, Vec<StoredEvent>, Vec<StoredEvent>)> {
+        let ev = self.events.read().unwrap();
+        // Same near-sorted lookup as `events`.
+        let from = ev.partition_point(|e| e.end < start.saturating_sub(1 << 20));
+        let i = from + ev[from..].iter().position(|e| e.start == start && e.channel == channel)?;
+        let e = ev[i].clone();
+        let mut before: Vec<StoredEvent> = ev[..i]
+            .iter()
+            .rev()
+            .filter(|x| x.source == e.source)
+            .take(context)
+            .cloned()
+            .collect();
+        before.reverse();
+        let after: Vec<StoredEvent> = ev[i + 1..].iter().filter(|x| x.source == e.source).take(context).cloned().collect();
+        Some((e, before, after))
     }
 
     /// The first event starting after `at` (or the last one before it),

@@ -155,7 +155,23 @@ impl Sd {
         out.push(Annotation {
             start,
             end,
-            event: Event::Protocol { proto: PROTO, text },
+            event: Event::Protocol {
+                proto: PROTO,
+                text,
+                data: None,
+            },
+        });
+    }
+
+    fn note_data(out: &mut Vec<Annotation>, start: u64, end: u64, text: String, data: &[u8]) {
+        out.push(Annotation {
+            start,
+            end,
+            event: Event::Protocol {
+                proto: PROTO,
+                text,
+                data: Some(data.into()),
+            },
         });
     }
 
@@ -585,7 +601,7 @@ impl Sd {
         } else {
             String::new()
         };
-        Self::note(
+        Self::note_data(
             out,
             start,
             end,
@@ -598,6 +614,7 @@ impl Sd {
                 if crc_ok { "ok" } else { "ERROR" },
                 if end_ok { "" } else { ", bad end bit" },
             ),
+            &bytes,
         );
         // Later blocks of the same transfer have the size that checked out.
         if matched.is_some() {

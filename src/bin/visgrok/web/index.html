@@ -55,6 +55,21 @@ footer { display: grid; grid-template-columns: 1fr; border-top: 1px solid var(--
 #screen .title button { padding: 0 6px; font-size: 11px; }
 .chan .lvl { position: absolute; right: 120px; font: 11px ui-monospace, Menlo, monospace; color: var(--hi); }
 .chan { position: relative; }
+#tip { position: fixed; z-index: 20; pointer-events: none; max-width: 520px; background: #1b2130; border: 1px solid #34405a; border-radius: 6px; padding: 6px 9px; font: 12px/1.45 ui-monospace, Menlo, monospace; color: #e8eefc; box-shadow: 0 6px 18px rgba(0,0,0,.5); white-space: pre-wrap; }
+#tip .src { color: var(--accent); }
+#modalbg { position: fixed; inset: 0; z-index: 30; background: rgba(5,7,10,.6); display: flex; align-items: center; justify-content: center; }
+#modal { width: min(900px, 94vw); max-height: 86vh; overflow: auto; background: var(--panel); border: 1px solid #34405a; border-radius: 10px; padding: 14px 18px 16px; box-shadow: 0 14px 40px rgba(0,0,0,.6); }
+#modal h2 { margin: 0 0 4px; font-size: 16px; }
+#modal .meta { color: var(--dim); margin-bottom: 10px; }
+#modal .lines { font: 12.5px/1.55 ui-monospace, Menlo, monospace; white-space: pre-wrap; background: #0d0f13; border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; margin: 8px 0; }
+#modal .hex { font: 12px/1.45 ui-monospace, Menlo, monospace; white-space: pre; overflow-x: auto; background: #0d0f13; border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; margin: 8px 0; color: #cfd6e4; }
+#modal .hex .off { color: var(--dim); } #modal .hex .asc { color: #9fb7d9; }
+#modal .ctx div { display: grid; grid-template-columns: 110px 1fr; gap: 10px; padding: 1px 6px; cursor: pointer; font: 12px/1.5 ui-monospace, Menlo, monospace; border-radius: 4px; }
+#modal .ctx div:hover { background: #1d2230; }
+#modal .ctx .cur { background: #1d3557; }
+#modal .ctx .t { color: var(--dim); text-align: right; }
+#modal .bar { display: flex; gap: 8px; justify-content: flex-end; margin-top: 10px; }
+#modal h3 { font-size: 12px; color: var(--dim); margin: 12px 0 4px; font-weight: 600; text-transform: uppercase; letter-spacing: .5px; }
 @media (max-width: 760px) { #main { grid-template-columns: 1fr; } #chans { display: none; } }
 </style>
 </head>
@@ -105,6 +120,8 @@ footer { display: grid; grid-template-columns: 1fr; border-top: 1px solid var(--
     <span class="hint">wheel: zoom · drag: pan · shift+click: Δt marker · [ ] events · b/B bookmark · End: live</span></div>
   <div id="events"></div>
 </footer>
+<div id="tip" hidden></div>
+<div id="modalbg" hidden><div id="modal" role="dialog" aria-modal="true"></div></div>
 <script>
 "use strict";
 // ------------------------------------------------------------ state
@@ -149,6 +166,7 @@ function onMessage(m) {
   } else if (m.type === "events") { pending.events = false; events = m.items; evFor = m; renderEvents(); draw(); pump(); }
   else if (m.type === "seek") { centerOn((m.start + m.end) / 2); }
   else if (m.type === "display") { onDisplay(m); }
+  else if (m.type === "event") { onEvent(m); }
   else if (m.type === "error") { flash(m.message, true); }
 }
 
@@ -240,6 +258,27 @@ function removeBookmark() {
   const at = cursor !== null ? cursor : (view.start + view.end) / 2, tol = (view.end - view.start) * 0.01;
   const near = (st.bookmarks || []).filter(([s]) => Math.abs(s - at) <= tol).sort((a, b) => Math.abs(a[0] - at) - Math.abs(b[0] - at))[0];
   if (near) send({ cmd: "bookmark", sample: near[0], remove: true });
+}
+
+// Short label for the waveform: the command or event name, not the whole
+// analysis ("CMD42 LOCK_UNLOCK arg 0x0" -> "CMD42 LOCK_UNLOCK",
+// "R1 (CMD42) status ..." -> "R1", "read block 4096: 512 B ..." -> "read block 4096").
+function shortLabel(text) {
+  const t = text.trim();
+  let m = /^──\s*(.*?)\s*──$/.exec(t); if (m) return m[1];
+  m = /^([A-Z]+\d+)\s+([A-Z][A-Z0-9_/]+)/.exec(t); if (m) return m[1] + " " + m[2];
+  m = /^(R\d+b?|R[1-7])\s*\(/.exec(t); if (m) return m[1];
+  const colon = t.indexOf(":");
+  if (colon > 0 && colon <= 32) return t.slice(0, colon);
+  m = /^([0-9a-f]{2}(?: '.')?)(?:\s|$)/.exec(t); if (m) return m[1];
+  if (t.length <= 28) return t;
+  let out = "";
+  for (const w of t.split(/\s+/)) { if ((out + " " + w).length > 24) break; out = out ? out + " " + w : w; }
+  return (out || t.slice(0, 24)) + "…";
+}
+// Full text split into readable lines.
+function textLines(text) {
+  return text.replace(/; /g, ";\n").replace(/ · /g, "\n").replace(/, (?=[A-Z_]{3,}|TA|TB|TC|TD|PPS|T=)/g, ",\n").split("\n");
 }
 
 function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]); }
@@ -386,11 +425,19 @@ window.addEventListener("mousemove", (e) => {
   }
   if (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) {
     cursor = view.start + ((e.clientX - r.left) / r.width) * (view.end - view.start); draw(); cursorLevels(); pumpScreen();
+    showTip(drag || modalEv ? null : eventAt(e.clientX, e.clientY), e.clientX, e.clientY);
   }
 });
 miniC.addEventListener("click", (e) => { const r = miniC.getBoundingClientRect(); centerOn(((e.clientX - r.left) / r.width) * st.total); });
 window.addEventListener("keydown", (e) => {
   if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
+  if (modalEv) {
+    if (e.key === "Escape") closeModal();
+    else if (e.key === "ArrowLeft" && modalEv.before.length) { const x = modalEv.before[modalEv.before.length - 1]; openEvent(x[0], x[2]); }
+    else if (e.key === "ArrowRight" && modalEv.after.length) { const x = modalEv.after[0]; openEvent(x[0], x[2]); }
+    else return;
+    e.preventDefault(); return;
+  }
   const span = view.end - view.start;
   if (e.key === "ArrowLeft") pan(-span * 0.2);
   else if (e.key === "ArrowRight") pan(span * 0.2);
@@ -463,6 +510,72 @@ function cursorLevels() {
     lvl.textContent = v === "1" ? "1" : v === "0" ? "0" : v === "x" ? "~" : "";
     lvl.style.color = v === "1" ? "var(--hi)" : "var(--dim)";
   }
+}
+
+// ------------------------------------------------------------ event tooltip and details
+let hoverEv = null, downAt = null;
+function eventAt(clientX, clientY) {
+  const r = wave.getBoundingClientRect(), x = clientX - r.left, y = clientY - r.top;
+  const ch = Math.floor((y - RULER) / ROW);
+  if (y < RULER || ch < 0 || ch >= (st.channels | 0)) return null;
+  const span = view.end - view.start, W = r.width, xOf = (s) => ((s - view.start) / span) * W;
+  let best = null;
+  for (const ev of events) {
+    if (ev[2] !== ch) continue;
+    const x1 = xOf(ev[0]), x2 = Math.max(xOf(ev[1]), x1 + 2);
+    if (x >= x1 - 2 && x <= x2 + 2) { best = ev; if (x >= x1) break; }
+  }
+  return best;
+}
+function showTip(ev, clientX, clientY) {
+  const tip = $("tip");
+  if (!ev) { tip.hidden = true; return; }
+  tip.innerHTML = `<span class="src">${esc(shortSrc(ev[3]))}</span>  ${esc(fmtTime(ev[0] / st.samplerate))}\n` + textLines(ev[4]).map(esc).join("\n") + (ev[5] ? `\n(${ev[5]} bytes — click for details)` : "\n(click for details)");
+  tip.hidden = false;
+  const w = tip.offsetWidth, h = tip.offsetHeight;
+  tip.style.left = Math.min(clientX + 14, innerWidth - w - 8) + "px";
+  tip.style.top = (clientY + h + 24 > innerHeight ? clientY - h - 12 : clientY + 16) + "px";
+}
+wave.addEventListener("mouseleave", () => { $("tip").hidden = true; });
+wave.addEventListener("mousedown", (e) => { downAt = [e.clientX, e.clientY]; }, true);
+wave.addEventListener("mouseup", (e) => {
+  const d0 = downAt; downAt = null;
+  if (!d0 || Math.hypot(e.clientX - d0[0], e.clientY - d0[1]) > 4 || e.shiftKey) return;
+  const ev = eventAt(e.clientX, e.clientY);
+  if (ev) openEvent(ev[0], ev[2]);
+});
+
+let modalEv = null;
+function openEvent(start, channel) { send({ cmd: "event", start, channel }); }
+function closeModal() { $("modalbg").hidden = true; modalEv = null; }
+$("modalbg").addEventListener("click", (e) => { if (e.target.id === "modalbg") closeModal(); });
+function hexdump(hex) {
+  const out = [];
+  for (let i = 0; i < hex.length / 2; i += 16) {
+    const row = hex.slice(i * 2, i * 2 + 32);
+    const bytes = row.match(/../g) || [];
+    const h = bytes.map((b, k) => b + (k === 7 ? "  " : " ")).join("").padEnd(50);
+    const a = bytes.map((b) => { const c = parseInt(b, 16); return c >= 32 && c < 127 ? String.fromCharCode(c) : "."; }).join("");
+    out.push(`<span class="off">${i.toString(16).padStart(4, "0")}</span>  ${h} <span class="asc">${esc(a)}</span>`);
+  }
+  return out.join("\n");
+}
+function onEvent(m) {
+  const [s, e, ch, src, text, n] = m.ev, sr = st.samplerate;
+  modalEv = m; $("tip").hidden = true;
+  const chName = (st.chans && st.chans[ch] && st.chans[ch].name) || "D" + ch;
+  const row = (x, cur) => `<div class="${cur ? "cur" : ""}" data-s="${x[0]}" data-c="${x[2]}"><span class="t">${fmtTime(x[0] / sr)}</span><span>${esc(x[4])}</span></div>`;
+  $("modal").innerHTML =
+    `<h2>${esc(shortLabel(text))}</h2>` +
+    `<div class="meta">${esc(src)} · ${esc(chName)} · at ${fmtTime(s / sr)} (#${s}) · lasts ${fmtTime(Math.max(0, e - s) / sr)}${n ? ` · ${n} bytes` : ""}</div>` +
+    `<div class="lines">${textLines(text).map(esc).join("\n")}</div>` +
+    (m.data ? `<h3>Payload (${m.data.length / 2} bytes)</h3><div class="hex">${hexdump(m.data)}</div>` : "") +
+    `<h3>Around it (${esc(shortSrc(src))})</h3><div class="ctx">${m.before.map((x) => row(x)).join("")}${row(m.ev, true)}${m.after.map((x) => row(x)).join("")}</div>` +
+    `<div class="bar"><button id="mzoom">Zoom to event</button><button id="mclose">Close (Esc)</button></div>`;
+  $("modalbg").hidden = false;
+  $("mclose").onclick = closeModal;
+  $("mzoom").onclick = () => { const span = Math.max((e - s) * 6, 64); follow = false; view.start = (s + e) / 2 - span / 2; view.end = view.start + span; clampView(); changed(); closeModal(); };
+  $("modal").querySelectorAll(".ctx div").forEach((d) => d.onclick = () => openEvent(+d.dataset.s, +d.dataset.c));
 }
 
 // ------------------------------------------------------------ requests
@@ -555,7 +668,7 @@ function draw() {
       g.fillStyle = "rgba(106,168,255,.8)"; g.fillRect(x, top, 1, h);
       if (x2 - x > 14) {
         g.save(); g.beginPath(); g.rect(x, top, x2 - x, h); g.clip();
-        g.fillStyle = "#e8eefc"; g.fillText(text, x + 3, top + h / 2); g.restore();
+        g.fillStyle = "#e8eefc"; g.fillText(shortLabel(text), x + 3, top + h / 2); g.restore();
       }
     }
   }
@@ -616,14 +729,16 @@ function renderEvents() {
   $("evcount").textContent = `${events.length}${events.length >= 3000 ? "+" : ""} in view · ${st.events | 0} total`;
   const sr = st.samplerate;
   $("events").innerHTML = events.slice(0, 1500).map(([s, e, ch, src, text]) =>
-    `<div data-s="${s}" data-e="${e}"><span class="t">${fmtTime(s / sr)}</span><span class="s" title="${esc(src)}">${esc(shortSrc(src))}</span><span class="x">${esc(text)}</span></div>`).join("");
+    `<div data-s="${s}" data-e="${e}" data-c="${ch}" title="${esc(text)}"><span class="t">${fmtTime(s / sr)}</span><span class="s" title="${esc(src)}">${esc(shortSrc(src))}</span><span class="x">${esc(text)}</span></div>`).join("");
 }
 // "SD clk=ch7 cmd=ch1 ..." -> "SD", "UART ch2 auto" -> "UART ch2".
 function shortSrc(src) { const w = src.split(" "); return w[1] && /^ch\d+$/.test(w[1]) ? w[0] + " " + w[1] : w[0]; }
 $("events").addEventListener("click", (e) => {
   const d = e.target.closest("div[data-s]"); if (!d) return;
-  const s = +d.dataset.s, en = +d.dataset.e, span = Math.max(view.end - view.start, (en - s) * 4);
-  follow = false; view.start = (s + en) / 2 - span / 2; view.end = view.start + span; clampView(); changed();
+  const s = +d.dataset.s, en = +d.dataset.e;
+  openEvent(s, +d.dataset.c);
+  // Bring it into view too (without zooming out of what's shown).
+  if (s < view.start || s > view.end) centerOn((s + en) / 2);
 });
 
 connect();

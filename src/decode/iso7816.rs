@@ -106,11 +106,15 @@ impl Iso7816 {
         }
     }
 
-    fn note(out: &mut Vec<Annotation>, start: u64, end: u64, text: String) {
+    fn note_data(out: &mut Vec<Annotation>, start: u64, end: u64, text: String, data: &[u8]) {
         out.push(Annotation {
             start,
             end,
-            event: Event::Protocol { proto: PROTO, text },
+            event: Event::Protocol {
+                proto: PROTO,
+                text,
+                data: Some(data.into()),
+            },
         });
     }
 
@@ -245,7 +249,7 @@ impl Iso7816 {
         let (start, end) = (self.frame[0].1, self.frame.last().unwrap().2);
         let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<Vec<_>>().join(" ");
         if self.phase == Phase::Atr && matches!(bytes[0], 0x3b | 0x3f) && Self::atr_len(&bytes) == Some(bytes.len()) {
-            Self::note(out, start, end, Self::describe_atr(&bytes));
+            Self::note_data(out, start, end, Self::describe_atr(&bytes), &bytes);
             self.phase = Phase::Session;
             self.pps_request = None;
             // The first offered protocol, until a PPS says otherwise.
@@ -253,7 +257,7 @@ impl Iso7816 {
         } else if bytes[0] == 0xff && Self::pps_len(&bytes) == Some(bytes.len()) {
             match self.pps_request.take() {
                 None => {
-                    Self::note(out, start, end, format!("PPS request: {}", Self::describe_pps(&bytes)));
+                    Self::note_data(out, start, end, format!("PPS request: {}", Self::describe_pps(&bytes)), &bytes);
                     self.pps_request = Some(bytes.clone());
                 }
                 Some(req) => {
@@ -262,7 +266,13 @@ impl Iso7816 {
                     } else {
                         "answered with different parameters"
                     };
-                    Self::note(out, start, end, format!("PPS response ({verdict}): {}", Self::describe_pps(&bytes)));
+                    Self::note_data(
+                        out,
+                        start,
+                        end,
+                        format!("PPS response ({verdict}): {}", Self::describe_pps(&bytes)),
+                        &bytes,
+                    );
                     self.protocol = bytes[1] & 15;
                 }
             }
@@ -276,7 +286,7 @@ impl Iso7816 {
                     format!("S-block {what} {}", if pcb & 0x20 != 0 { "response" } else { "request" })
                 }
             };
-            Self::note(
+            Self::note_data(
                 out,
                 start,
                 end,
@@ -284,14 +294,16 @@ impl Iso7816 {
                     "T=1 {kind}, NAD {nad:02x}, {len} bytes: {} (LRC ok)",
                     hex(&bytes[3..3 + len as usize])
                 ),
+                &bytes,
             );
         } else {
             let what = if self.phase == Phase::Atr { "data before an ATR" } else { "frame" };
-            Self::note(
+            Self::note_data(
                 out,
                 start,
                 end,
                 format!("{what} (T={}), {} bytes: {}", self.protocol, bytes.len(), hex(&bytes)),
+                &bytes,
             );
         }
         self.frame.clear();

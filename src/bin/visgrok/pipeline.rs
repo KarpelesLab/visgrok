@@ -229,6 +229,10 @@ impl Pipeline {
                                         source,
                                         channel,
                                         text: format_event(&t.annotation.event),
+                                        data: match &t.annotation.event {
+                                            visgrok::decode::Event::Protocol { data, .. } => data.clone(),
+                                            _ => None,
+                                        },
                                     }
                                 }),
                         );

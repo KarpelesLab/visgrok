@@ -379,6 +379,10 @@ impl Session {
                                 source,
                                 channel,
                                 text: format_event(&t.annotation.event),
+                                data: match &t.annotation.event {
+                                    visgrok::decode::Event::Protocol { data, .. } => data.clone(),
+                                    _ => None,
+                                },
                             }
                         }),
                 );
@@ -697,11 +701,7 @@ impl Session {
                 let start = msg.get("start").and_then(Json::num).unwrap_or(0.0).max(0.0) as u64;
                 let end = msg.get("end").and_then(Json::num).unwrap_or(0.0).max(0.0) as u64;
                 let limit = msg.get("limit").and_then(Json::num).unwrap_or(2000.0) as usize;
-                let items: Vec<String> = store
-                    .events(start, end, limit)
-                    .iter()
-                    .map(|e| format!(r#"[{},{},{},{},{}]"#, e.start, e.end, e.channel, jstr(&e.source), jstr(&e.text)))
-                    .collect();
+                let items: Vec<String> = store.events(start, end, limit).iter().map(event_json).collect();
                 Some(format!(
                     r#"{{"type":"events","id":{id},"start":{start},"end":{end},"items":[{}]}}"#,
                     items.join(",")
@@ -803,6 +803,29 @@ impl Session {
                     rows.join(",")
                 ))
             }
+            "event" => {
+                // One event in full: text, payload and the surrounding events
+                // of the same decoder.
+                let store = self.store()?;
+                let start = msg.get("start").and_then(Json::num)?.max(0.0) as u64;
+                let ch = msg.get("channel").and_then(Json::num).unwrap_or(0.0) as u8;
+                let Some((e, before, after)) = store.event_with_context(start, ch, 6) else {
+                    return Some(r#"{"type":"error","message":"event not found"}"#.to_string());
+                };
+                let hex: String = e
+                    .data
+                    .as_deref()
+                    .map(|d| d.iter().map(|b| format!("{b:02x}")).collect())
+                    .unwrap_or_default();
+                let list = |v: &[StoredEvent]| v.iter().map(event_json).collect::<Vec<_>>().join(",");
+                Some(format!(
+                    r#"{{"type":"event","ev":{},"data":{},"before":[{}],"after":[{}]}}"#,
+                    event_json(&e),
+                    jstr(&hex),
+                    list(&before),
+                    list(&after)
+                ))
+            }
             "seek" => {
                 let store = self.store()?;
                 let at = msg.get("at").and_then(Json::num).unwrap_or(0.0).max(0.0) as u64;
@@ -821,6 +844,19 @@ impl Session {
             )),
         }
     }
+}
+
+/// `[start, end, channel, source, text, payload bytes]`.
+fn event_json(e: &StoredEvent) -> String {
+    format!(
+        r#"[{},{},{},{},{},{}]"#,
+        e.start,
+        e.end,
+        e.channel,
+        jstr(&e.source),
+        jstr(&e.text),
+        e.data.as_ref().map_or(0, |d| d.len())
+    )
 }
 
 // ---------------------------------------------------------------- server

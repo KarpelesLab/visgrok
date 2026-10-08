@@ -37,8 +37,10 @@ pub struct Ssd1306 {
     com_flip: bool,
     start_line: usize,
     contrast: u8,
-    // Current run of data bytes: (start sample, count, page, col).
+    // Current run of data bytes: (start sample, count, page, col, end).
     run: Option<(u64, u64, usize, usize, u64)>,
+    /// Bytes of the current run (for detailed views).
+    run_bytes: Vec<u8>,
     updates: u64,
     scratch: Vec<Annotation>,
 }
@@ -74,6 +76,7 @@ impl Ssd1306 {
             start_line: 0,
             contrast: 0x7f,
             run: None,
+            run_bytes: Vec::new(),
             updates: 0,
             scratch: Vec::new(),
         }
@@ -87,7 +90,23 @@ impl Ssd1306 {
         out.push(Annotation {
             start,
             end,
-            event: Event::Protocol { proto: PROTO, text },
+            event: Event::Protocol {
+                proto: PROTO,
+                text,
+                data: None,
+            },
+        });
+    }
+
+    fn note_data(out: &mut Vec<Annotation>, start: u64, end: u64, text: String, data: &[u8]) {
+        out.push(Annotation {
+            start,
+            end,
+            event: Event::Protocol {
+                proto: PROTO,
+                text,
+                data: Some(data.into()),
+            },
         });
     }
 
@@ -95,11 +114,13 @@ impl Ssd1306 {
         if let Some((start, n, page, col, end)) = self.run.take() {
             self.updates += 1;
             let mode = ["horizontal", "vertical", "page"][self.mode.min(2) as usize];
-            Self::note(
+            let bytes = std::mem::take(&mut self.run_bytes);
+            Self::note_data(
                 out,
                 start,
                 end,
                 format!("write {n} bytes at page {page} col {col} ({mode} addressing)"),
+                &bytes,
             );
             // The screen after this update, for viewers that show it at any
             // point in time.
@@ -125,6 +146,7 @@ impl Ssd1306 {
             }
             None => self.run = Some((start, 1, self.page, self.col, end)),
         }
+        self.run_bytes.push(byte);
         if self.page < self.pages() && self.col < self.width {
             self.ram[self.page * self.width + self.col] = byte;
         }
