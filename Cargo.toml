@@ -1,7 +1,7 @@
 [package]
 name = "visgrok"
 description = "From-scratch driver, real-time protocol analysis and TUI for Sipeed SLogic logic analyzers"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT"
