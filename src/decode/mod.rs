@@ -74,6 +74,8 @@ pub enum Event {
         /// Level of the D/C line at the last bit, if assigned (true = data).
         dc: Option<bool>,
     },
+    /// What a display shows after an update (e.g. SSD1306 RAM writes).
+    Frame(std::sync::Arc<DisplayView>),
     /// A message from a higher-level protocol decoder (e.g. SSD1306).
     Protocol {
         /// Protocol name.
@@ -103,7 +105,7 @@ pub trait Decoder: Send {
 }
 
 /// A monochrome display reconstructed by a decoder.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DisplayView {
     /// Controller name.
     pub title: &'static str,

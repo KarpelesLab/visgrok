@@ -49,6 +49,12 @@ footer { display: grid; grid-template-columns: 1fr; border-top: 1px solid var(--
 #events .s { color: var(--accent); overflow: hidden; text-overflow: ellipsis; }
 #events .x { overflow: hidden; text-overflow: ellipsis; }
 .hint { color: var(--dim); font-size: 11px; }
+#screen { position: absolute; top: 30px; right: 14px; background: #0b0d10; border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px 8px; box-shadow: 0 6px 20px rgba(0,0,0,.45); }
+#screen canvas { display: block; image-rendering: pixelated; background: #05070a; border-radius: 3px; }
+#screen .title { color: var(--dim); font-size: 11px; margin-bottom: 4px; display: flex; justify-content: space-between; gap: 10px; }
+#screen .title button { padding: 0 6px; font-size: 11px; }
+.chan .lvl { position: absolute; right: 120px; font: 11px ui-monospace, Menlo, monospace; color: var(--hi); }
+.chan { position: relative; }
 @media (max-width: 760px) { #main { grid-template-columns: 1fr; } #chans { display: none; } }
 </style>
 </head>
@@ -86,14 +92,16 @@ footer { display: grid; grid-template-columns: 1fr; border-top: 1px solid var(--
 <div id="minimap"><canvas id="mini" style="width:100%;height:100%;display:block"></canvas></div>
 <div id="main">
   <div id="chans"></div>
-  <div id="wavewrap"><canvas id="wave"></canvas></div>
+  <div id="wavewrap"><canvas id="wave"></canvas>
+    <div id="screen" hidden><div class="title"><span id="scrtitle">display</span><button id="scrclose" title="Hide">×</button></div><canvas id="scr" width="128" height="64"></canvas></div>
+  </div>
 </div>
 <footer>
   <div id="evhead"><b style="color:var(--text)">Decoded</b><span id="evcount"></span>
     <span id="buses" style="color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1"></span>
     <details id="notesbox" style="position:relative"><summary style="cursor:pointer">Notes</summary>
       <textarea id="notes" rows="6" style="position:absolute;right:0;bottom:24px;width:420px;z-index:5;font:inherit;color:var(--text);background:#0d0f13;border:1px solid var(--line);border-radius:6px;padding:6px" placeholder="Notes saved in the capture's sidecar file"></textarea></details>
-    <span class="hint">wheel: zoom · drag: pan · [ ] events · b/B bookmark · End: live</span></div>
+    <span class="hint">wheel: zoom · drag: pan · shift+click: Δt marker · [ ] events · b/B bookmark · End: live</span></div>
   <div id="events"></div>
 </footer>
 <script>
@@ -135,10 +143,11 @@ function onMessage(m) {
   else if (m.type === "files") onFiles(m);
   else if (m.type === "view") {
     pending[m.tag] = false;
-    if (m.tag === "mini") { mini = m; drawMini(); } else { rows = m.rows; rowsFor = m; draw(); }
+    if (m.tag === "mini") { mini = m; drawMini(); } else { rows = m.rows; rowsFor = m; draw(); cursorLevels(); }
     pump();
   } else if (m.type === "events") { pending.events = false; events = m.items; evFor = m; renderEvents(); draw(); pump(); }
   else if (m.type === "seek") { centerOn((m.start + m.end) / 2); }
+  else if (m.type === "display") { onDisplay(m); }
   else if (m.type === "error") { flash(m.message, true); }
 }
 
@@ -152,16 +161,14 @@ function fmtTime(s) {
 }
 // Ruler label for time t (s) with enough decimals for tick spacing `step` (s).
 function fmtTick(t, step) {
-  // Past a second, seconds with as many decimals as the spacing needs read
-  // better than "5155834500 ns".
-  if (Math.abs(t) >= 1) return t.toFixed(Math.min(9, Math.max(0, Math.ceil(-Math.log10(step) - 1e-9)))) + " s";
-  for (const [u, f] of [["s", 1], ["ms", 1e3], ["µs", 1e6], ["ns", 1e9]]) {
-    if (step * f >= 1 || u === "ns") {
-      const d = Math.max(0, Math.ceil(-Math.log10(step * f) + 1e-9));
-      return (t * f).toFixed(Math.min(9, d)) + " " + u;
-    }
-  }
+  // Unit from the magnitude of t, decimals from the tick spacing:
+  // "5.1558345 s", "803.2 ms", "12.35 µs".
+  const a = Math.abs(t);
+  const [u, f] = a >= 1 || t === 0 && step >= 1 ? ["s", 1] : a >= 1e-3 ? ["ms", 1e3] : a >= 1e-6 ? ["µs", 1e6] : ["ns", 1e9];
+  const d = Math.min(9, Math.max(0, Math.ceil(-Math.log10(step * f) - 1e-9)));
+  return (t * f).toFixed(d) + " " + u;
 }
+function fmtHz(f) { return f >= 1e6 ? (f / 1e6).toFixed(3) + " MHz" : f >= 1e3 ? (f / 1e3).toFixed(3) + " kHz" : f.toFixed(2) + " Hz"; }
 function fmtBytes(n) { return n >= 1e9 ? (n / 1e9).toFixed(2) + " GB" : n >= 1e6 ? (n / 1e6).toFixed(1) + " MB" : (n / 1e3).toFixed(1) + " kB"; }
 let flashTimer = null, flashMsg = null;
 function flash(msg, err) { flashMsg = { msg, err }; clearTimeout(flashTimer); flashTimer = setTimeout(() => { flashMsg = null; renderStatus(); }, 5000); renderStatus(); }
@@ -188,7 +195,7 @@ function onStatus(m) {
   if (grew || modeChanged) { dirty.main = dirty.events = true; dirty.mini = true; }
   draw(); drawMini();
   if (m.mode === "review" && m.loaded < m.total) dirty.mini = true;
-  renderStatus(); resize(); pump();
+  renderStatus(); resize(); pump(); pumpScreen();
 }
 
 function renderStatus() {
@@ -249,9 +256,10 @@ function buildChannels() {
   for (let i = 0; i < (st.channels | 0); i++) {
     const d = document.createElement("div");
     d.className = "chan"; d.style.height = ROW + "px";
-    d.innerHTML = `<input value="" spellcheck="false" title="Channel ${i} name"><select>${ROLES.map(([v, t]) => `<option value="${v}">${t}</option>`).join("")}</select>`;
+    d.innerHTML = `<input value="" spellcheck="false" title="Channel ${i} name"><select>${ROLES.map(([v, t]) => `<option value="${v}">${t}</option>`).join("")}</select><span class="lvl"></span>`;
     const [inp, sel] = d.querySelectorAll("input,select");
     inp.addEventListener("change", sendNames);
+    inp.style.paddingRight = "22px";
     sel.addEventListener("change", sendRoles);
     box.appendChild(d);
   }
@@ -357,7 +365,10 @@ wave.addEventListener("wheel", (e) => {
   else zoomAt(frac, Math.exp(e.deltaY * 0.0015));
 }, { passive: false });
 let drag = null;
-wave.addEventListener("mousedown", (e) => { drag = { x: e.clientX, start: view.start, end: view.end }; wave.classList.add("drag"); });
+wave.addEventListener("mousedown", (e) => {
+  if (e.shiftKey) { marker = marker !== null && cursor !== null && Math.abs(marker - cursor) < (view.end - view.start) / 200 ? null : cursor; draw(); return; }
+  drag = { x: e.clientX, start: view.start, end: view.end }; wave.classList.add("drag");
+});
 window.addEventListener("mouseup", () => { drag = null; wave.classList.remove("drag"); });
 window.addEventListener("mousemove", (e) => {
   const r = wave.getBoundingClientRect();
@@ -368,7 +379,7 @@ window.addEventListener("mousemove", (e) => {
     clampView(); changed();
   }
   if (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) {
-    cursor = view.start + ((e.clientX - r.left) / r.width) * (view.end - view.start); draw();
+    cursor = view.start + ((e.clientX - r.left) / r.width) * (view.end - view.start); draw(); cursorLevels(); pumpScreen();
   }
 });
 miniC.addEventListener("click", (e) => { const r = miniC.getBoundingClientRect(); centerOn(((e.clientX - r.left) / r.width) * st.total); });
@@ -389,6 +400,58 @@ window.addEventListener("keydown", (e) => {
   else return;
   e.preventDefault();
 });
+
+// ------------------------------------------------------------ screen panel, cursor readout, marker
+let scrHidden = false, scrPending = false, scrWant = null, scrShown = null;
+let marker = null; // reference sample for Δt measurements (shift+click)
+$("scrclose").onclick = () => { scrHidden = true; $("screen").hidden = true; };
+function screenAt() {
+  if (cursor !== null && cursor >= view.start && cursor <= view.end) return Math.floor(cursor);
+  return Math.floor(follow ? st.total : view.end);
+}
+function pumpScreen() {
+  if (scrHidden || !(st.frames > 0) || scrPending) return;
+  const at = screenAt();
+  if (scrShown !== null && Math.abs(at - scrShown) < (view.end - view.start) / 2000) return;
+  scrPending = true; scrWant = at; send({ cmd: "display", at });
+}
+function onDisplay(m) {
+  scrPending = false; scrShown = scrWant;
+  const box = $("screen");
+  if (!m.rows) { box.hidden = true; return; }
+  box.hidden = scrHidden;
+  const c = $("scr"), g = c.getContext("2d");
+  if (c.width !== m.width || c.height !== m.height) { c.width = m.width; c.height = m.height; }
+  const scale = Math.max(1, Math.floor(320 / m.width));
+  c.style.width = m.width * scale + "px"; c.style.height = m.height * scale + "px";
+  const img = g.createImageData(m.width, m.height);
+  const on = m.on ? [140, 210, 255] : [70, 90, 110];
+  m.rows.forEach((row, y) => {
+    for (let x = 0; x < m.width; x++) {
+      const bit = (parseInt(row[x >> 2], 16) >> (3 - (x & 3))) & 1, i = (y * m.width + x) * 4;
+      const [r, gg, b] = bit ? on : [8, 11, 15];
+      img.data[i] = r; img.data[i + 1] = gg; img.data[i + 2] = b; img.data[i + 3] = 255;
+    }
+  });
+  g.putImageData(img, 0, 0);
+  $("scrtitle").textContent = `${m.title} · update ${m.update} · ${fmtTime(m.sample / st.samplerate)}${m.on ? "" : " · off"}`;
+  pumpScreen();
+}
+function cursorLevels() {
+  const kids = $("chans").children;
+  let col = -1;
+  if (rows && rowsFor && cursor !== null) {
+    const f = (cursor - rowsFor.start) / (rowsFor.end - rowsFor.start);
+    col = Math.floor(f * rowsFor.columns);
+  }
+  for (let i = 0; i < kids.length; i++) {
+    const lvl = kids[i].querySelector(".lvl");
+    if (!lvl) continue;
+    const v = col >= 0 && rows[i] ? rows[i][col] : undefined;
+    lvl.textContent = v === "1" ? "1" : v === "0" ? "0" : v === "x" ? "~" : "";
+    lvl.style.color = v === "1" ? "var(--hi)" : "var(--dim)";
+  }
+}
 
 // ------------------------------------------------------------ requests
 function pump() {
@@ -492,11 +555,21 @@ function draw() {
     g.fillStyle = "#f0b45a"; g.beginPath(); g.moveTo(x - 5, 0); g.lineTo(x + 5, 0); g.lineTo(x, 8); g.fill();
     if (label) { g.font = "11px ui-sans-serif, system-ui"; g.fillText(label, x + 7, 6); }
   }
+  // Reference marker (shift+click) for Δt measurements.
+  if (marker !== null && marker >= view.start && marker <= view.end) {
+    const x = xOf(marker);
+    g.fillStyle = "rgba(200,140,255,.8)";
+    for (let y = RULER; y < H; y += 6) g.fillRect(x, y, 1, 3);
+  }
   // Cursor.
   if (cursor !== null && cursor >= view.start && cursor <= view.end) {
     const x = xOf(cursor);
     g.fillStyle = "rgba(240,180,90,.7)"; g.fillRect(x, RULER, 1, H);
-    const label = fmtTime(cursor / sr) + "  #" + Math.floor(cursor);
+    let label = fmtTime(cursor / sr) + "  #" + Math.floor(cursor);
+    if (marker !== null) {
+      const dt = Math.abs(cursor - marker) / sr;
+      label += `  Δ ${fmtTime(dt)}` + (dt > 0 ? `  (${fmtHz(1 / dt)})` : "");
+    }
     g.font = "11px ui-monospace, Menlo, monospace";
     const tw = g.measureText(label).width + 8, lx = Math.min(x + 4, W - tw);
     g.fillStyle = "#2a2416"; g.fillRect(lx, 2, tw, RULER - 6);

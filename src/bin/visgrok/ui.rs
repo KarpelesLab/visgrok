@@ -169,6 +169,7 @@ fn snapshot(a: &Analyzer, window: u64) -> Snapshot {
             .annotations
             .iter()
             .skip(skip)
+            .filter(|t| !matches!(t.annotation.event, visgrok::decode::Event::Frame(_)))
             .map(|t| format_annotation(t, &names, a.samplerate()))
             .collect(),
         gaps: a.gaps,

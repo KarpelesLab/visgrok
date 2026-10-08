@@ -211,16 +211,27 @@ impl Pipeline {
                             .map(|d| (Arc::from(d.name()), d.channels().trailing_zeros() as u8))
                             .collect();
                         let skip = a.annotations.len() - new;
-                        store.add_events(a.annotations.iter().skip(skip).map(|t| {
-                            let (source, channel) = names.get(t.decoder).cloned().unwrap_or((Arc::from("?"), 0));
-                            StoredEvent {
-                                start: t.annotation.start,
-                                end: t.annotation.end,
-                                source,
-                                channel,
-                                text: format_event(&t.annotation.event),
+                        for t in a.annotations.iter().skip(skip) {
+                            if let Event::Frame(v) = &t.annotation.event {
+                                store.add_frame(t.annotation.start, v.clone());
                             }
-                        }));
+                        }
+                        store.add_events(
+                            a.annotations
+                                .iter()
+                                .skip(skip)
+                                .filter(|t| !matches!(t.annotation.event, Event::Frame(_)))
+                                .map(|t| {
+                                    let (source, channel) = names.get(t.decoder).cloned().unwrap_or((Arc::from("?"), 0));
+                                    StoredEvent {
+                                        start: t.annotation.start,
+                                        end: t.annotation.end,
+                                        source,
+                                        channel,
+                                        text: format_event(&t.annotation.event),
+                                    }
+                                }),
+                        );
                     }
                 }
                 drop(a);
@@ -364,6 +375,7 @@ impl Pipeline {
             a.annotations
                 .iter()
                 .skip(skip)
+                .filter(|t| !matches!(t.annotation.event, Event::Frame(_)))
                 .map(|t| format_annotation(t, &names, a.samplerate())),
         );
         out
@@ -422,6 +434,7 @@ pub fn format_event(e: &Event) -> String {
         Event::UartBaud { baud } => format!("── baud rate {baud} ──"),
         Event::UartFormat { format } => format!("── frame format {format} ──"),
         Event::Protocol { text, .. } => text.clone(),
+        Event::Frame(v) => format!("{} screen update {}", v.title, v.updates),
     }
 }
 

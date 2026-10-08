@@ -109,6 +109,8 @@ pub struct SampleStore {
     file: Mutex<Option<File>>,
     cache: Mutex<VecDeque<(u64, Arc<Vec<u8>>)>>,
     events: RwLock<Vec<StoredEvent>>,
+    /// Display contents after each update, in sample order.
+    frames: RwLock<Vec<(u64, Arc<crate::decode::DisplayView>)>>,
 }
 
 impl SampleStore {
@@ -131,6 +133,7 @@ impl SampleStore {
             file: Mutex::new(None),
             cache: Mutex::new(VecDeque::new()),
             events: RwLock::new(Vec::new()),
+            frames: RwLock::new(Vec::new()),
         }
     }
 
@@ -454,9 +457,32 @@ impl SampleStore {
         self.events.write().unwrap().extend(ev);
     }
 
-    /// Forgets decoded events (before re-decoding with new settings).
+    /// Forgets decoded events and display frames (before re-decoding).
     pub fn clear_events(&self) {
         self.events.write().unwrap().clear();
+        self.frames.write().unwrap().clear();
+    }
+
+    /// Records what a display shows from sample `at` on.
+    pub fn add_frame(&self, at: u64, view: Arc<crate::decode::DisplayView>) {
+        let mut f = self.frames.write().unwrap();
+        // Bounded memory: past the cap, keep every other old frame.
+        if f.len() >= 100_000 {
+            let mut i = 0;
+            f.retain(|_| {
+                i += 1;
+                i % 2 == 0
+            });
+        }
+        f.push((at, view));
+    }
+
+    /// The display as it was at sample `at` (the last update before it),
+    /// with the update's sample index; also the number of frames.
+    pub fn frame_at(&self, at: u64) -> (Option<(u64, Arc<crate::decode::DisplayView>)>, usize) {
+        let f = self.frames.read().unwrap();
+        let i = f.partition_point(|(s, _)| *s <= at);
+        ((i > 0).then(|| f[i - 1].clone()), f.len())
     }
 
     /// Number of decoded events.

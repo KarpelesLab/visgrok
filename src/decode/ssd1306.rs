@@ -101,6 +101,13 @@ impl Ssd1306 {
                 end,
                 format!("write {n} bytes at page {page} col {col} ({mode} addressing)"),
             );
+            // The screen after this update, for viewers that show it at any
+            // point in time.
+            out.push(Annotation {
+                start: end,
+                end,
+                event: Event::Frame(std::sync::Arc::new(self.view())),
+            });
         }
     }
 
@@ -332,6 +339,13 @@ impl Decoder for Ssd1306 {
     }
 
     fn display(&self) -> Option<DisplayView> {
+        Some(self.view())
+    }
+}
+
+impl Ssd1306 {
+    /// What the panel shows now.
+    fn view(&self) -> DisplayView {
         let pages = self.pages();
         let mut pixels = vec![false; self.width * self.height];
         for y in 0..self.height {
@@ -346,14 +360,14 @@ impl Decoder for Ssd1306 {
                 pixels[sy * self.width + x] = on ^ self.inverted;
             }
         }
-        Some(DisplayView {
+        DisplayView {
             title: PROTO,
             width: self.width,
             height: self.height,
             pixels,
             on: self.on,
             updates: self.updates,
-        })
+        }
     }
 }
 

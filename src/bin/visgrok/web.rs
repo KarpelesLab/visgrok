@@ -359,16 +359,27 @@ impl Session {
                 a.process(&b);
                 let new = ((a.annotation_count - before) as usize).min(a.annotations.len());
                 let skip = a.annotations.len() - new;
-                store.add_events(a.annotations.iter().skip(skip).map(|t| {
-                    let (source, channel) = names.get(t.decoder).cloned().unwrap_or((Arc::from("?"), 0));
-                    StoredEvent {
-                        start: t.annotation.start,
-                        end: t.annotation.end,
-                        source,
-                        channel,
-                        text: format_event(&t.annotation.event),
+                for t in a.annotations.iter().skip(skip) {
+                    if let visgrok::decode::Event::Frame(v) = &t.annotation.event {
+                        store.add_frame(t.annotation.start, v.clone());
                     }
-                }));
+                }
+                store.add_events(
+                    a.annotations
+                        .iter()
+                        .skip(skip)
+                        .filter(|t| !matches!(t.annotation.event, visgrok::decode::Event::Frame(_)))
+                        .map(|t| {
+                            let (source, channel) = names.get(t.decoder).cloned().unwrap_or((Arc::from("?"), 0));
+                            StoredEvent {
+                                start: t.annotation.start,
+                                end: t.annotation.end,
+                                source,
+                                channel,
+                                text: format_event(&t.annotation.event),
+                            }
+                        }),
+                );
                 progress.store(b.end(), Ordering::SeqCst);
             }
             progress.store(u64::MAX, Ordering::SeqCst);
@@ -425,6 +436,7 @@ impl Session {
             o.str("rate", &fmt_hz(info.samplerate as f64));
             o.num("channels", info.channels as f64);
             o.num("events", s.event_count() as f64);
+            o.num("frames", s.frame_at(u64::MAX).1 as f64);
             let names = self.names.lock().unwrap();
             let roles = self.roles.lock().unwrap();
             let chans: Vec<String> = (0..info.channels)
@@ -633,6 +645,35 @@ impl Session {
                 }
                 self.save_sidecar();
                 Some(self.status_json())
+            }
+            "display" => {
+                // The reconstructed display at a moment: rows of hex, 1 bit
+                // per pixel, MSB = leftmost.
+                let store = self.store()?;
+                let at = msg.get("at").and_then(Json::num).unwrap_or(0.0).max(0.0) as u64;
+                let (frame, count) = store.frame_at(at);
+                let Some((sample, v)) = frame else {
+                    return Some(format!(r#"{{"type":"display","frames":{count}}}"#));
+                };
+                let rows: Vec<String> = (0..v.height)
+                    .map(|y| {
+                        let mut row = String::with_capacity(v.width / 4);
+                        for x in (0..v.width).step_by(4) {
+                            let n = (0..4).fold(0u8, |n, k| n << 1 | (x + k < v.width && v.pixels[y * v.width + x + k]) as u8);
+                            row.push(char::from_digit(n as u32, 16).unwrap());
+                        }
+                        jstr(&row)
+                    })
+                    .collect();
+                Some(format!(
+                    r#"{{"type":"display","frames":{count},"sample":{sample},"title":{},"width":{},"height":{},"on":{},"update":{},"rows":[{}]}}"#,
+                    jstr(v.title),
+                    v.width,
+                    v.height,
+                    v.on,
+                    v.updates,
+                    rows.join(",")
+                ))
             }
             "seek" => {
                 let store = self.store()?;
