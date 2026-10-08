@@ -55,3 +55,39 @@ visgrok -i capture.vgk --headless --auto     # replay through the analyzers
 visgrok -i capture.vgk -o capture.sr --headless   # convert for PulseView
 cargo run --release --example selftest -- capture.vgk   # verify an emulation-pattern capture
 ```
+
+## Sidecar files (`<capture>.json`)
+
+What the signals *are* lives next to the capture, in `run1.vgk.json` (or
+`navi.sr.json` for a sigrok file): channel names, the role of each channel
+(which wires form which bus), decoder settings, recording settings,
+bookmarks and notes. It is plain JSON, works for every capture format, and
+can change after the capture is closed (the `.vgk` itself is append-only).
+
+```json
+{
+  "visgrok": 1,
+  "capture": "run1.vgk",
+  "channels": [
+    {"name":"CLK8M","role":""},
+    {"name":"UART","role":"uart"},
+    {"name":"SCLK","role":"spi-clk"},
+    {"name":"DC","role":"spi-dc"},
+    {"name":"CS","role":"spi-cs"},
+    {"name":"MOSI","role":"spi-mosi"}
+  ],
+  "decoders": {"spi_protocol":"ssd1306","spi_mode":null,"spi_cs_active_high":false,"uart_format":"auto","uart_follow":true},
+  "recording": {"device":"SLogic16 U3 #202512191855","samplerate":200000000,"threshold_v":1.65},
+  "bookmarks": [{"sample":1031167000,"label":"CMD42 SET_PWD"}],
+  "notes": "head unit boot"
+}
+```
+
+Roles are the `--role` names (`uart`, `uart:BAUD`, `spi-clk`, `spi-mosi`,
+`spi-miso`, `spi-cs`, `spi-dc`, `i2c-scl:SDA`, `i2c-sda:SCL`, `sd-clk`,
+`sd-cmd`, `sd-dat0`..`sd-dat3`, `idle`); buses are the channels sharing a
+protocol. Who reads and writes it:
+
+- recording (`-o`, the web UI) writes it at start and on every change;
+- replay (`-i` without `--role`), `--info` and the web UI read it;
+- `visgrok convert` copies it to the output (`capture.sr.json`).

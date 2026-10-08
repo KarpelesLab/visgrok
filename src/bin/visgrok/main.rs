@@ -13,6 +13,7 @@ use visgrok::Source;
 use visgrok::analyzer::{DecoderOptions, SpiProtocol, parse_uart_format};
 use visgrok::formats::{Format, ReadOptions, WriteOptions};
 use visgrok::roles::{Role, fmt_hz};
+use visgrok::sidecar::Sidecar;
 use visgrok::slogic::{Config, Pattern, SLogic};
 use visgrok::srzip::SrCompression;
 use visgrok::synth::Synth;
@@ -240,6 +241,13 @@ fn main() {
         };
         let t = std::time::Instant::now();
         let mut last = std::time::Instant::now();
+        // The sidecar travels with the capture.
+        if let Ok(Some(mut sc)) = Sidecar::load(input) {
+            sc.capture = output.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+            if let Err(e) = sc.save(output) {
+                eprintln!("visgrok: copying sidecar: {e}");
+            }
+        }
         let r = visgrok::formats::convert(input, output, &ropts, &wopts, |n| {
             if last.elapsed().as_secs_f64() > 1.0 {
                 eprint!("\r{n} samples...");
@@ -351,6 +359,28 @@ fn main() {
         }
         names[ch] = Some(name.to_string());
     }
+    // Replaying a capture without --role: use its sidecar (roles, names and
+    // decoder settings saved with it).
+    let (mut roles, mut options, mut names) = (roles, options, names);
+    if let Some(input) = &args.input
+        && args.roles.is_empty()
+    {
+        match Sidecar::load(input) {
+            Ok(Some(sc)) => {
+                eprintln!("visgrok: using {}", visgrok::sidecar::path_for(input).display());
+                for b in sc.buses() {
+                    eprintln!("  {b}");
+                }
+                roles = sc.roles.clone();
+                options = sc.options.clone();
+                if names.is_empty() {
+                    names = sc.names.iter().map(|n| (!n.is_empty()).then(|| n.clone())).collect();
+                }
+            }
+            Ok(None) => {}
+            Err(e) => eprintln!("visgrok: {e}"),
+        }
+    }
     let setup = Setup {
         extra,
         roles,
@@ -366,6 +396,25 @@ fn main() {
             std::process::exit(1);
         }
     };
+    // Recording: describe the capture in its sidecar (again at the end, with
+    // any roles changed in the TUI).
+    let save_sidecar = |pipe: &Pipeline| {
+        let (Some(out), None) = (&args.output, &args.input) else { return };
+        let sc = Sidecar {
+            capture: out.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default(),
+            names: pipe.names.clone(),
+            roles: pipe.roles.lock().unwrap().clone(),
+            options: pipe.options.lock().unwrap().clone(),
+            device: Some(pipe.info.device.clone()),
+            samplerate: Some(pipe.info.samplerate),
+            threshold: args.threshold,
+            ..Default::default()
+        };
+        if let Err(e) = sc.save(out) {
+            eprintln!("visgrok: saving sidecar: {e}");
+        }
+    };
+    save_sidecar(&pipe);
     let result = if args.headless {
         headless(&pipe, args.auto)
     } else {
@@ -373,6 +422,7 @@ fn main() {
     };
     pipe.stop();
     let summary = pipe.join();
+    save_sidecar(&pipe);
     if let Err(e) = result {
         eprintln!("visgrok: {e}");
     }
@@ -425,6 +475,22 @@ fn info(path: &std::path::Path) -> std::io::Result<()> {
         for (k, v) in &v.meta().extra {
             println!("{k:<11} {v}");
         }
+    }
+    match Sidecar::load(path) {
+        Ok(Some(sc)) => {
+            println!("sidecar:    {}", visgrok::sidecar::path_for(path).display());
+            for b in sc.buses() {
+                println!("  bus:      {b}");
+            }
+            for b in &sc.bookmarks {
+                println!("  bookmark: {:.6} s  {}", b.sample as f64 / sr, b.label);
+            }
+            if !sc.notes.is_empty() {
+                println!("  notes:    {}", sc.notes.replace('\n', "\n            "));
+            }
+        }
+        Ok(None) => {}
+        Err(e) => eprintln!("visgrok: {e}"),
     }
     let n = m.channels;
     let mask = visgrok::block::channel_mask(n);

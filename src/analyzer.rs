@@ -34,6 +34,15 @@ pub enum SpiProtocol {
 }
 
 impl SpiProtocol {
+    /// Text form accepted by [`SpiProtocol::parse`].
+    pub fn id(&self) -> String {
+        match self {
+            SpiProtocol::Raw => "raw".into(),
+            SpiProtocol::Ssd1306 { width: 128, height: 64 } => "ssd1306".into(),
+            SpiProtocol::Ssd1306 { width, height } => format!("ssd1306:{width}x{height}"),
+        }
+    }
+
     /// Parses `raw`, `ssd1306`, `ssd1306:128x32`.
     pub fn parse(s: &str) -> Result<SpiProtocol, String> {
         let (name, arg) = s.split_once(':').map_or((s, None), |(n, a)| (n, Some(a)));
@@ -55,7 +64,7 @@ impl SpiProtocol {
 }
 
 /// Settings applied when building decoders from roles.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DecoderOptions {
     /// SPI mode (0..=3); `None` infers CPOL from the clock idle level.
     pub spi_mode: Option<u8>,
@@ -67,6 +76,22 @@ pub struct DecoderOptions {
     pub uart_auto: bool,
     /// UART frame format (data bits, parity, stop bits); `None` detects it.
     pub uart_format: Option<(u8, Parity, u8)>,
+}
+
+/// Text form of a UART frame format (`auto` for `None`), accepted by
+/// [`parse_uart_format`].
+pub fn uart_format_id(f: Option<(u8, Parity, u8)>) -> String {
+    match f {
+        None => "auto".into(),
+        Some((d, p, s)) => format!(
+            "{d}{}{s}",
+            match p {
+                Parity::None => 'N',
+                Parity::Even => 'E',
+                Parity::Odd => 'O',
+            }
+        ),
+    }
 }
 
 /// Parses a UART frame format such as `8N1`, `8E2`, `7O1` into data bits,

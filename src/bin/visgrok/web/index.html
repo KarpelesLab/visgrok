@@ -75,6 +75,9 @@ footer { display: grid; grid-template-columns: 1fr; border-top: 1px solid var(--
     <label>UART</label><select id="uartfmt"><option value="auto">auto</option><option>8N1</option><option>8E1</option><option>8E2</option><option>8O1</option><option>7E1</option></select>
   </div>
   <div class="group">
+    <select id="marks" title="Bookmarks (b: add at cursor, B: remove nearest)"><option value="">Bookmarks…</option></select>
+  </div>
+  <div class="group">
     <button id="follow" title="Keep the newest samples in view (End)">⏵ Live</button>
     <button id="fit" title="Show the whole capture (0)">Fit</button>
   </div>
@@ -87,7 +90,10 @@ footer { display: grid; grid-template-columns: 1fr; border-top: 1px solid var(--
 </div>
 <footer>
   <div id="evhead"><b style="color:var(--text)">Decoded</b><span id="evcount"></span>
-    <span class="hint">wheel: zoom · drag / shift+wheel: pan · ←/→ pan · +/- zoom · [ ] previous/next event · End: live</span></div>
+    <span id="buses" style="color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1"></span>
+    <details id="notesbox" style="position:relative"><summary style="cursor:pointer">Notes</summary>
+      <textarea id="notes" rows="6" style="position:absolute;right:0;bottom:24px;width:420px;z-index:5;font:inherit;color:var(--text);background:#0d0f13;border:1px solid var(--line);border-radius:6px;padding:6px" placeholder="Notes saved in the capture's sidecar file"></textarea></details>
+    <span class="hint">wheel: zoom · drag: pan · [ ] events · b/B bookmark · End: live</span></div>
   <div id="events"></div>
 </footer>
 <script>
@@ -171,11 +177,16 @@ function onStatus(m) {
   if (chChanged || modeChanged) buildChannels();
   else updateChannels();
   $("spiproto").value = m.spiProto || "raw";
+  renderMarks();
+  $("buses").textContent = (m.buses || []).join("  ·  ");
+  $("buses").title = m.sidecar ? "Saved in " + m.sidecar : "";
+  if (document.activeElement !== $("notes")) $("notes").value = m.notes || "";
   if (follow && st.total > 0) {
     const span = Math.max(16, view.end - view.start);
     view.end = st.total; view.start = Math.max(0, st.total - span);
   }
   if (grew || modeChanged) { dirty.main = dirty.events = true; dirty.mini = true; }
+  draw(); drawMini();
   if (m.mode === "review" && m.loaded < m.total) dirty.mini = true;
   renderStatus(); resize(); pump();
 }
@@ -198,6 +209,27 @@ function renderStatus() {
   $("follow").classList.toggle("on", follow);
   $("start").disabled = st.mode === "live" && st.running;
   $("stop").disabled = !(st.mode === "live" && st.running);
+}
+
+function renderMarks() {
+  const sel = $("marks"), list = st.bookmarks || [], key = JSON.stringify(list);
+  if (sel.dataset.key === key) return;
+  sel.dataset.key = key;
+  sel.innerHTML = `<option value="">Bookmarks (${list.length})…</option>` +
+    list.map(([s, l]) => `<option value="${s}">${fmtTime(s / st.samplerate)} — ${esc(l || "(no label)")}</option>`).join("");
+}
+$("marks").onchange = (e) => { if (e.target.value) { centerOn(+e.target.value); e.target.value = ""; } };
+let notesTimer = null;
+$("notes").addEventListener("input", () => { clearTimeout(notesTimer); notesTimer = setTimeout(() => send({ cmd: "notes", text: $("notes").value }), 500); });
+function addBookmark() {
+  const at = Math.floor(cursor !== null ? cursor : (view.start + view.end) / 2);
+  const label = prompt("Bookmark label at " + fmtTime(at / st.samplerate), "");
+  if (label !== null) send({ cmd: "bookmark", sample: at, label });
+}
+function removeBookmark() {
+  const at = cursor !== null ? cursor : (view.start + view.end) / 2, tol = (view.end - view.start) * 0.01;
+  const near = (st.bookmarks || []).filter(([s]) => Math.abs(s - at) <= tol).sort((a, b) => Math.abs(a[0] - at) - Math.abs(b[0] - at))[0];
+  if (near) send({ cmd: "bookmark", sample: near[0], remove: true });
 }
 
 function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]); }
@@ -341,7 +373,7 @@ window.addEventListener("mousemove", (e) => {
 });
 miniC.addEventListener("click", (e) => { const r = miniC.getBoundingClientRect(); centerOn(((e.clientX - r.left) / r.width) * st.total); });
 window.addEventListener("keydown", (e) => {
-  if (e.target.tagName === "INPUT") return;
+  if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
   const span = view.end - view.start;
   if (e.key === "ArrowLeft") pan(-span * 0.2);
   else if (e.key === "ArrowRight") pan(span * 0.2);
@@ -352,6 +384,8 @@ window.addEventListener("keydown", (e) => {
   else if (e.key === "0") fitAll();
   else if (e.key === "]") send({ cmd: "seek", at: Math.floor((view.start + view.end) / 2), forward: true });
   else if (e.key === "[") send({ cmd: "seek", at: Math.floor((view.start + view.end) / 2), forward: false });
+  else if (e.key === "b") addBookmark();
+  else if (e.key === "B") removeBookmark();
   else return;
   e.preventDefault();
 });
@@ -450,6 +484,14 @@ function draw() {
       }
     }
   }
+  // Bookmarks.
+  for (const [bs, label] of st.bookmarks || []) {
+    if (bs < view.start || bs > view.end) continue;
+    const x = xOf(bs);
+    g.fillStyle = "rgba(240,180,90,.35)"; g.fillRect(x, RULER, 1, H);
+    g.fillStyle = "#f0b45a"; g.beginPath(); g.moveTo(x - 5, 0); g.lineTo(x + 5, 0); g.lineTo(x, 8); g.fill();
+    if (label) { g.font = "11px ui-sans-serif, system-ui"; g.fillText(label, x + 7, 6); }
+  }
   // Cursor.
   if (cursor !== null && cursor >= view.start && cursor <= view.end) {
     const x = xOf(cursor);
@@ -478,6 +520,8 @@ function drawMini() {
       if (busy) { const h = 4 + (H - 8) * busy / mini.rows.length; g.fillStyle = "rgba(95,184,138,.75)"; g.fillRect(c * cw, H - h, cw + 0.5, h); }
     }
   }
+  g.fillStyle = "#f0b45a";
+  for (const [bs] of st.bookmarks || []) g.fillRect((bs / st.total) * W, 0, 2, H);
   const x = (view.start / st.total) * W, x2 = (view.end / st.total) * W;
   g.fillStyle = "rgba(106,168,255,.18)"; g.fillRect(x, 0, Math.max(2, x2 - x), H);
   g.fillStyle = "#6aa8ff"; g.fillRect(x, 0, 1, H); g.fillRect(Math.max(x + 1, x2 - 1), 0, 1, H);

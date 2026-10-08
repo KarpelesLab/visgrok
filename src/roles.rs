@@ -382,6 +382,27 @@ pub fn detect(stats: &Stats, corr: &Correlator, samplerate: u64) -> Vec<Suggesti
 }
 
 impl Role {
+    /// Canonical text form, accepted back by [`Role::parse`] (empty for
+    /// [`Role::Unknown`]).
+    pub fn id(&self) -> String {
+        match self {
+            Role::Unknown => String::new(),
+            Role::Uart { baud: 0 } => "uart".into(),
+            Role::Uart { baud } => format!("uart:{baud}"),
+            Role::I2cScl { sda } => format!("i2c-scl:{sda}"),
+            Role::I2cSda { scl } => format!("i2c-sda:{scl}"),
+            Role::SpiClk => "spi-clk".into(),
+            Role::SpiMosi | Role::SpiData { .. } => "spi-mosi".into(),
+            Role::SpiMiso => "spi-miso".into(),
+            Role::SpiCs => "spi-cs".into(),
+            Role::SpiDc => "spi-dc".into(),
+            Role::SdClk => "sd-clk".into(),
+            Role::SdCmd => "sd-cmd".into(),
+            Role::SdDat(n) => format!("sd-dat{n}"),
+            Role::Idle | Role::Clock { .. } | Role::Data => "idle".into(),
+        }
+    }
+
     /// Parses a role name as used on the command line: `uart`, `uart:115200`,
     /// `spi-clk`, `spi-mosi`, `spi-miso`, `spi-cs`, `spi-dc`, `i2c-scl:SDA`,
     /// `i2c-sda:SCL`, `sd-clk`, `sd-cmd`, `sd-dat0`..`sd-dat3`, `idle`.

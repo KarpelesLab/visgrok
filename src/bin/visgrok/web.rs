@@ -19,7 +19,9 @@ use std::time::Duration;
 
 use visgrok::Source;
 use visgrok::analyzer::{Analyzer, DecoderOptions, SpiProtocol, parse_uart_format};
+use visgrok::json::{Json, Obj, jstr};
 use visgrok::roles::{Role, Suggestion, fmt_hz};
+use visgrok::sidecar::{Bookmark, Sidecar};
 use visgrok::slogic::{Config, SLogic};
 use visgrok::store::{SampleStore, StoredEvent};
 use visgrok::synth::Synth;
@@ -71,30 +73,86 @@ struct Session {
     options: Mutex<DecoderOptions>,
     names: Mutex<Vec<String>>,
     error: Mutex<Option<String>>,
+    /// The capture the user sees (for imported files, the original), whose
+    /// sidecar (`<capture>.json`) holds roles, names, bookmarks and notes.
+    capture: Mutex<Option<PathBuf>>,
+    bookmarks: Mutex<Vec<Bookmark>>,
+    notes: Mutex<String>,
+    /// Recording settings: device, sample rate, threshold.
+    recording: Mutex<(Option<String>, Option<u64>, Option<f64>)>,
 }
 
 fn role_id(r: &Option<Role>) -> String {
-    match r {
-        None | Some(Role::Unknown) => String::new(),
-        Some(Role::Uart { baud: 0 }) => "uart".into(),
-        Some(Role::Uart { baud }) => format!("uart:{baud}"),
-        Some(Role::I2cScl { sda }) => format!("i2c-scl:{sda}"),
-        Some(Role::I2cSda { scl }) => format!("i2c-sda:{scl}"),
-        Some(Role::SpiClk) => "spi-clk".into(),
-        Some(Role::SpiMosi) => "spi-mosi".into(),
-        Some(Role::SpiMiso) => "spi-miso".into(),
-        Some(Role::SpiCs) => "spi-cs".into(),
-        Some(Role::SpiDc) => "spi-dc".into(),
-        Some(Role::SpiData { .. }) => "spi-mosi".into(),
-        Some(Role::SdClk) => "sd-clk".into(),
-        Some(Role::SdCmd) => "sd-cmd".into(),
-        Some(Role::SdDat(n)) => format!("sd-dat{n}"),
-        Some(Role::Idle) => "idle".into(),
-        Some(r) => r.to_string(),
-    }
+    r.as_ref().map(Role::id).unwrap_or_default()
 }
 
 impl Session {
+    /// The sidecar describing the current capture.
+    fn sidecar(&self) -> Sidecar {
+        let cap = self.capture.lock().unwrap().clone();
+        let rec = self.recording.lock().unwrap().clone();
+        Sidecar {
+            capture: cap
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .map(|f| f.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            names: self.names.lock().unwrap().clone(),
+            roles: self.roles.lock().unwrap().clone(),
+            options: self.options.lock().unwrap().clone(),
+            device: rec.0,
+            samplerate: rec.1,
+            threshold: rec.2,
+            bookmarks: self.bookmarks.lock().unwrap().clone(),
+            notes: self.notes.lock().unwrap().clone(),
+        }
+    }
+
+    /// Writes the sidecar next to the current capture.
+    fn save_sidecar(&self) {
+        let Some(cap) = self.capture.lock().unwrap().clone() else { return };
+        if let Err(e) = self.sidecar().save(&cap) {
+            self.set_error(format!("saving {}: {e}", visgrok::sidecar::path_for(&cap).display()));
+        }
+    }
+
+    /// Adopts a capture's sidecar (or defaults when it has none).
+    fn load_sidecar(&self, capture: &Path, default_names: Vec<String>) {
+        let sc = match Sidecar::load(capture) {
+            Ok(s) => s,
+            Err(e) => {
+                self.set_error(e.to_string());
+                None
+            }
+        };
+        *self.capture.lock().unwrap() = Some(capture.to_path_buf());
+        match sc {
+            Some(sc) => {
+                let names = (0..default_names.len())
+                    .map(|i| {
+                        sc.names
+                            .get(i)
+                            .filter(|n| !n.is_empty())
+                            .cloned()
+                            .unwrap_or_else(|| default_names[i].clone())
+                    })
+                    .collect();
+                *self.names.lock().unwrap() = names;
+                *self.roles.lock().unwrap() = sc.roles;
+                *self.options.lock().unwrap() = sc.options;
+                *self.bookmarks.lock().unwrap() = sc.bookmarks;
+                *self.notes.lock().unwrap() = sc.notes;
+                *self.recording.lock().unwrap() = (sc.device, sc.samplerate, sc.threshold);
+            }
+            None => {
+                *self.names.lock().unwrap() = default_names;
+                *self.bookmarks.lock().unwrap() = Vec::new();
+                *self.notes.lock().unwrap() = String::new();
+                *self.recording.lock().unwrap() = (None, None, None);
+            }
+        }
+    }
+
     fn store(&self) -> Option<Arc<SampleStore>> {
         match &*self.mode.lock().unwrap() {
             Mode::Idle | Mode::Importing { .. } => None,
@@ -172,9 +230,19 @@ impl Session {
             store: Some(store.clone()),
             ..Default::default()
         };
-        let pipe = Pipeline::start(source, Some(path), setup)?;
+        let pipe = Pipeline::start(source, Some(path.clone()), setup)?;
         *self.mode.lock().unwrap() = Mode::Live { pipe, store };
         *self.error.lock().unwrap() = None;
+        *self.capture.lock().unwrap() = Some(path);
+        *self.names.lock().unwrap() = info.names.clone();
+        *self.recording.lock().unwrap() = (
+            Some(info.device.clone()),
+            Some(info.samplerate),
+            msg.get("threshold").and_then(Json::num),
+        );
+        self.bookmarks.lock().unwrap().clear();
+        self.notes.lock().unwrap().clear();
+        self.save_sidecar();
         Ok(())
     }
 
@@ -189,13 +257,13 @@ impl Session {
         self.close();
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
         if ext == "vgk" {
-            return self.review(path);
+            return self.review(path, path);
         }
         // Other formats are imported once (in the background) into a .vgk
         // next to them, with an overview so later opens are instant.
         let out = path.with_extension(format!("{ext}.vgk"));
         if out.exists() {
-            return self.review(&out);
+            return self.review(&out, path);
         }
         let progress = Arc::new(AtomicU64::new(0));
         let cancel = Arc::new(AtomicBool::new(false));
@@ -211,9 +279,10 @@ impl Session {
             let r = SampleStore::import(&src, &tmp, &progress, &cancel).and_then(|()| std::fs::rename(&tmp, &out));
             match r {
                 Ok(()) => {
-                    if matches!(&*me.mode.lock().unwrap(), Mode::Importing { .. })
-                        && let Err(e) = me.review(&out)
-                    {
+                    // Not cancelled meanwhile? (Evaluated on its own: review()
+                    // takes the mode lock too.)
+                    let still = matches!(&*me.mode.lock().unwrap(), Mode::Importing { .. });
+                    if still && let Err(e) = me.review(&out, &src) {
                         me.set_error(e);
                     }
                 }
@@ -229,9 +298,12 @@ impl Session {
         Ok(())
     }
 
-    fn review(&self, vgk: &Path) -> Result<(), String> {
+    /// Opens `vgk` for review; `original` is the file the user opened (it
+    /// differs for imported .sr/.vcd files) and holds the sidecar.
+    fn review(&self, vgk: &Path, original: &Path) -> Result<(), String> {
         let store = SampleStore::open(vgk).map_err(|e| format!("{}: {e}", vgk.display()))?;
-        *self.names.lock().unwrap() = store.info().all_names();
+        self.load_sidecar(original, store.info().all_names());
+        store.set_names(self.names.lock().unwrap().clone());
         *self.mode.lock().unwrap() = Mode::Review { store, decode: None };
         *self.error.lock().unwrap() = None;
         self.redecode();
@@ -304,6 +376,8 @@ impl Session {
     }
 
     fn status_json(&self) -> String {
+        // Before taking any other lock: sidecar() locks names/roles/options.
+        let buses: Vec<String> = self.sidecar().buses().iter().map(|b| jstr(b)).collect();
         let mode = self.mode.lock().unwrap();
         let mut o = Obj::new();
         o.str("type", "status");
@@ -366,15 +440,34 @@ impl Session {
                 .collect();
             o.raw("chans", &format!("[{}]", chans.join(",")));
         }
-        let opts = self.options.lock().unwrap();
+        let spi = self.options.lock().unwrap().spi_protocol;
         o.str(
             "spiProto",
-            match opts.spi_protocol {
+            match spi {
                 SpiProtocol::Raw => "raw",
                 SpiProtocol::Ssd1306 { height: 32, .. } => "ssd1306:128x32",
                 SpiProtocol::Ssd1306 { .. } => "ssd1306",
             },
         );
+        let marks: Vec<String> = self
+            .bookmarks
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|b| format!("[{},{}]", b.sample, jstr(&b.label)))
+            .collect();
+        o.raw("bookmarks", &format!("[{}]", marks.join(",")));
+        o.str("notes", &self.notes.lock().unwrap());
+        o.raw("buses", &format!("[{}]", buses.join(",")));
+        if let Some(c) = &*self.capture.lock().unwrap() {
+            o.str(
+                "sidecar",
+                &visgrok::sidecar::path_for(c)
+                    .file_name()
+                    .map(|f| f.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            );
+        }
         if let Some(e) = &*self.error.lock().unwrap() {
             o.str("error", e);
         }
@@ -471,6 +564,7 @@ impl Session {
                     }
                 }
                 self.apply_roles();
+                self.save_sidecar();
                 Some(self.status_json())
             }
             "names" => {
@@ -485,6 +579,7 @@ impl Session {
                         );
                     }
                     *self.names.lock().unwrap() = names;
+                    self.save_sidecar();
                 }
                 Some(self.status_json())
             }
@@ -520,6 +615,25 @@ impl Session {
                     items.join(",")
                 ))
             }
+            "notes" => {
+                *self.notes.lock().unwrap() = msg.get("text").and_then(Json::str).unwrap_or("").to_string();
+                self.save_sidecar();
+                Some(self.status_json())
+            }
+            "bookmark" => {
+                let sample = msg.get("sample").and_then(Json::num)?.max(0.0) as u64;
+                let label = msg.get("label").and_then(Json::str).unwrap_or("").to_string();
+                {
+                    let mut b = self.bookmarks.lock().unwrap();
+                    b.retain(|m| m.sample != sample);
+                    if msg.get("remove").and_then(Json::bool) != Some(true) {
+                        b.push(Bookmark { sample, label });
+                    }
+                    b.sort_by_key(|m| m.sample);
+                }
+                self.save_sidecar();
+                Some(self.status_json())
+            }
             "seek" => {
                 let store = self.store()?;
                 let at = msg.get("at").and_then(Json::num).unwrap_or(0.0).max(0.0) as u64;
@@ -551,6 +665,10 @@ pub fn run(opts: WebOptions) -> io::Result<()> {
         options: Mutex::new(DecoderOptions::default()),
         names: Mutex::new(Vec::new()),
         error: Mutex::new(None),
+        capture: Mutex::new(None),
+        bookmarks: Mutex::new(Vec::new()),
+        notes: Mutex::new(String::new()),
+        recording: Mutex::new((None, None, None)),
     });
     if let Some(p) = &opts.open
         && let Err(e) = session.open_path(p)
@@ -714,215 +832,6 @@ fn websocket(mut reader: BufReader<TcpStream>, out: TcpStream, session: Arc<Sess
     };
     alive.store(false, Ordering::SeqCst);
     r
-}
-
-// ---------------------------------------------------------------- JSON
-
-/// A parsed JSON value.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Json {
-    Null,
-    Bool(bool),
-    Num(f64),
-    Str(String),
-    Arr(Vec<Json>),
-    Obj(Vec<(String, Json)>),
-}
-
-impl Json {
-    pub fn parse(s: &str) -> Option<Json> {
-        let mut p = Parser { b: s.as_bytes(), i: 0 };
-        let v = p.value()?;
-        p.ws();
-        (p.i == p.b.len()).then_some(v)
-    }
-
-    pub fn get(&self, k: &str) -> Option<&Json> {
-        match self {
-            Json::Obj(o) => o.iter().find(|(n, _)| n == k).map(|(_, v)| v),
-            _ => None,
-        }
-    }
-
-    pub fn str(&self) -> Option<&str> {
-        match self {
-            Json::Str(s) => Some(s),
-            _ => None,
-        }
-    }
-
-    pub fn num(&self) -> Option<f64> {
-        match self {
-            Json::Num(n) => Some(*n),
-            _ => None,
-        }
-    }
-
-    pub fn bool(&self) -> Option<bool> {
-        match self {
-            Json::Bool(b) => Some(*b),
-            _ => None,
-        }
-    }
-}
-
-struct Parser<'a> {
-    b: &'a [u8],
-    i: usize,
-}
-
-impl Parser<'_> {
-    fn ws(&mut self) {
-        while self.i < self.b.len() && self.b[self.i].is_ascii_whitespace() {
-            self.i += 1;
-        }
-    }
-
-    fn eat(&mut self, c: u8) -> Option<()> {
-        self.ws();
-        (self.b.get(self.i) == Some(&c)).then(|| self.i += 1)
-    }
-
-    fn value(&mut self) -> Option<Json> {
-        self.ws();
-        match *self.b.get(self.i)? {
-            b'{' => {
-                self.i += 1;
-                let mut o = Vec::new();
-                if self.eat(b'}').is_some() {
-                    return Some(Json::Obj(o));
-                }
-                loop {
-                    self.ws();
-                    let Json::Str(k) = self.string()? else { return None };
-                    self.eat(b':')?;
-                    o.push((k, self.value()?));
-                    if self.eat(b',').is_none() {
-                        self.eat(b'}')?;
-                        return Some(Json::Obj(o));
-                    }
-                }
-            }
-            b'[' => {
-                self.i += 1;
-                let mut a = Vec::new();
-                if self.eat(b']').is_some() {
-                    return Some(Json::Arr(a));
-                }
-                loop {
-                    a.push(self.value()?);
-                    if self.eat(b',').is_none() {
-                        self.eat(b']')?;
-                        return Some(Json::Arr(a));
-                    }
-                }
-            }
-            b'"' => self.string(),
-            b't' if self.b[self.i..].starts_with(b"true") => {
-                self.i += 4;
-                Some(Json::Bool(true))
-            }
-            b'f' if self.b[self.i..].starts_with(b"false") => {
-                self.i += 5;
-                Some(Json::Bool(false))
-            }
-            b'n' if self.b[self.i..].starts_with(b"null") => {
-                self.i += 4;
-                Some(Json::Null)
-            }
-            _ => {
-                let s = self.i;
-                while self.i < self.b.len() && matches!(self.b[self.i], b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E') {
-                    self.i += 1;
-                }
-                std::str::from_utf8(&self.b[s..self.i]).ok()?.parse().ok().map(Json::Num)
-            }
-        }
-    }
-
-    fn string(&mut self) -> Option<Json> {
-        if self.b.get(self.i) != Some(&b'"') {
-            return None;
-        }
-        self.i += 1;
-        let mut out = String::new();
-        loop {
-            let c = *self.b.get(self.i)?;
-            self.i += 1;
-            match c {
-                b'"' => return Some(Json::Str(out)),
-                b'\\' => {
-                    let e = *self.b.get(self.i)?;
-                    self.i += 1;
-                    match e {
-                        b'n' => out.push('\n'),
-                        b't' => out.push('\t'),
-                        b'r' => out.push('\r'),
-                        b'b' => out.push('\u{8}'),
-                        b'f' => out.push('\u{c}'),
-                        b'u' => {
-                            let h = std::str::from_utf8(self.b.get(self.i..self.i + 4)?).ok()?;
-                            self.i += 4;
-                            out.push(char::from_u32(u32::from_str_radix(h, 16).ok()?).unwrap_or('\u{fffd}'));
-                        }
-                        c => out.push(c as char),
-                    }
-                }
-                _ => {
-                    // Copy a run of plain UTF-8 bytes.
-                    let s = self.i - 1;
-                    while self.i < self.b.len() && self.b[self.i] != b'"' && self.b[self.i] != b'\\' {
-                        self.i += 1;
-                    }
-                    out.push_str(std::str::from_utf8(&self.b[s..self.i]).ok()?);
-                }
-            }
-        }
-    }
-}
-
-/// JSON string literal.
-fn jstr(s: &str) -> String {
-    let mut o = String::with_capacity(s.len() + 2);
-    o.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => o.push_str("\\\""),
-            '\\' => o.push_str("\\\\"),
-            '\n' => o.push_str("\\n"),
-            '\r' => o.push_str("\\r"),
-            '\t' => o.push_str("\\t"),
-            c if (c as u32) < 0x20 => o.push_str(&format!("\\u{:04x}", c as u32)),
-            c => o.push(c),
-        }
-    }
-    o.push('"');
-    o
-}
-
-/// Builds a JSON object.
-struct Obj(Vec<String>);
-
-impl Obj {
-    fn new() -> Obj {
-        Obj(Vec::new())
-    }
-    fn str(&mut self, k: &str, v: &str) {
-        self.0.push(format!("{}:{}", jstr(k), jstr(v)));
-    }
-    fn num(&mut self, k: &str, v: f64) {
-        self.0
-            .push(format!("{}:{}", jstr(k), if v.is_finite() { v.to_string() } else { "null".into() }));
-    }
-    fn bool(&mut self, k: &str, v: bool) {
-        self.0.push(format!("{}:{v}", jstr(k)));
-    }
-    fn raw(&mut self, k: &str, v: &str) {
-        self.0.push(format!("{}:{v}", jstr(k)));
-    }
-    fn finish(self) -> String {
-        format!("{{{}}}", self.0.join(","))
-    }
 }
 
 // ---------------------------------------------------------------- SHA-1, base64

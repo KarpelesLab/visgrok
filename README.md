@@ -62,6 +62,11 @@ part of a live or recorded capture (wheel to zoom, drag to pan, minimap,
 decoded events to jump to them. The view position is kept in the URL, so
 links point at a moment in a capture.
 
+Channel names, roles (buses), decoder settings, bookmarks (`b`) and notes
+are saved in a sidecar next to the capture (`capture.vgk.json`, see
+[docs/FORMAT.md](docs/FORMAT.md)) and restored when it is opened again —
+also by `visgrok -i` and `visgrok --info`.
+
 The capture never waits for the page: data streams to disk and the browser
 reads it through a sample store (a 0.2% overview for zoomed-out views, raw
 chunks for zoomed-in ones). `.sr`/`.vcd` files are imported once into a
