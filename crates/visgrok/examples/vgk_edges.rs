@@ -15,7 +15,7 @@ fn main() -> std::io::Result<()> {
     let mut det = EdgeDetector::new(mask);
     let mut tr = Vec::new();
     let mut shown = 0;
-    let mut last = vec![0u64; 16];
+    let mut last = [0u64; 16];
     while let Some(b) = r.read_block()? {
         if (b.end() as f64) < from * sr {
             // still feed the detector so levels are right
