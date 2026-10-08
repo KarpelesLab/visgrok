@@ -13,7 +13,8 @@ use visgrok::analyzer::{DecoderOptions, SpiProtocol, parse_uart_format};
 use visgrok::roles::{Role, fmt_hz};
 use visgrok::slogic::{Config, Pattern, SLogic};
 use visgrok::synth::Synth;
-use visgrok::vgk::VgkReader;
+use visgrok::formats::{Format, ReadOptions, WriteOptions};
+use visgrok::srzip::SrCompression;
 
 use crate::pipeline::{Pipeline, Setup};
 
@@ -21,11 +22,14 @@ use crate::pipeline::{Pipeline, Setup};
 #[derive(Parser, Debug)]
 #[command(version, about = "Live capture and analysis for Sipeed SLogic logic analyzers")]
 pub struct Args {
-    /// Output file: compressed visgrok capture (.vgk), or a sigrok session
-    /// when the name ends in .sr. Nothing is written when omitted.
+    #[command(subcommand)]
+    command: Option<Command>,
+    /// Output file; the format follows the extension: .vgk (default,
+    /// compressed), .sr (sigrok), .vcd, .bin. Nothing is written when omitted.
     #[arg(short, long)]
     output: Option<PathBuf>,
-    /// Replay a .vgk capture instead of capturing (combine with -o to convert).
+    /// Replay a capture (.vgk, .sr, .vcd; .bin with -s and -c) through the
+    /// analyzers instead of capturing.
     #[arg(short, long)]
     input: Option<PathBuf>,
     /// Sample rate, e.g. 20M, 100M. Defaults to the device's maximum for the
@@ -43,7 +47,7 @@ pub struct Args {
     /// Select the device with this serial number.
     #[arg(long)]
     serial: Option<String>,
-    /// Summarize a .vgk capture (per-channel activity over time) and exit.
+    /// Summarize a capture file (per-channel activity over time) and exit.
     #[arg(long, value_name = "FILE")]
     info: Option<PathBuf>,
     /// List connected devices and exit.
@@ -93,6 +97,34 @@ pub struct Args {
     uart_fixed: bool,
 }
 
+/// Subcommands.
+#[derive(clap::Subcommand, Debug)]
+enum Command {
+    /// Convert a capture between formats: .vgk, .sr, .vcd, .bin (by
+    /// extension). No analysis; every sample is copied.
+    Convert {
+        /// Input file.
+        input: PathBuf,
+        /// Output file.
+        output: PathBuf,
+        /// Sample rate of a raw .bin input (or override for .vcd).
+        #[arg(short, long, value_parser = parse_rate)]
+        samplerate: Option<u64>,
+        /// Channel count of a raw .bin input.
+        #[arg(short, long)]
+        channels: Option<usize>,
+        /// Store .sr chunks uncompressed instead of deflating them.
+        #[arg(long)]
+        sr_store: bool,
+        /// Input format, when the extension doesn't tell (vgk, sr, vcd, bin).
+        #[arg(long)]
+        from: Option<String>,
+        /// Output format, when the extension doesn't tell.
+        #[arg(long)]
+        to: Option<String>,
+    },
+}
+
 /// Parses `20M`, `1.5G`, `400k` or a plain number of Hz.
 fn parse_rate(s: &str) -> Result<u64, String> {
     let s = s.trim().trim_end_matches("Hz").trim_end_matches("hz").trim();
@@ -109,8 +141,9 @@ fn parse_rate(s: &str) -> Result<u64, String> {
 fn open_source(args: &Args) -> Result<Box<dyn Source>, String> {
     let limit = |rate: u64| args.duration.map(|d| (d * rate as f64) as u64);
     if let Some(p) = &args.input {
-        let r = VgkReader::open(p).map_err(|e| format!("{}: {e}", p.display()))?;
-        return Ok(Box::new(r));
+        let ropts = ReadOptions { samplerate: args.samplerate, channels: Some(args.channels), format: None };
+        let r = visgrok::formats::open(p, &ropts).map_err(|e| format!("{}: {e}", p.display()))?;
+        return Ok(r);
     }
     if let Some(scenario) = &args.demo {
         return match scenario.as_str() {
@@ -148,6 +181,52 @@ fn open_source(args: &Args) -> Result<Box<dyn Source>, String> {
 
 fn main() {
     let args = Args::parse();
+    if let Some(Command::Convert { input, output, samplerate, channels, sr_store, from, to }) = &args.command {
+        let fmt = |s: &Option<String>| -> Option<Format> {
+            s.as_deref().map(|n| {
+                Format::parse(n).unwrap_or_else(|| {
+                    eprintln!("visgrok: unknown format {n:?} (vgk, sr, vcd, bin)");
+                    std::process::exit(2)
+                })
+            })
+        };
+        let ropts = ReadOptions { samplerate: *samplerate, channels: *channels, format: fmt(from) };
+        let wopts = WriteOptions {
+            sr_compression: if *sr_store { SrCompression::Store } else { SrCompression::Deflate },
+            format: fmt(to),
+            ..Default::default()
+        };
+        let t = std::time::Instant::now();
+        let mut last = std::time::Instant::now();
+        let r = visgrok::formats::convert(input, output, &ropts, &wopts, |n| {
+            if last.elapsed().as_secs_f64() > 1.0 {
+                eprint!("\r{n} samples...");
+                last = std::time::Instant::now();
+            }
+        });
+        match r {
+            Ok(c) => {
+                let insize = std::fs::metadata(input).map_or(0, |m| m.len());
+                eprintln!(
+                    "\r{} → {}: {} samples ({:.3} s, {} ch @ {}), {} → {} in {:.1}s",
+                    input.display(),
+                    output.display(),
+                    c.samples,
+                    c.samples as f64 / c.info.samplerate as f64,
+                    c.info.channels,
+                    fmt_hz(c.info.samplerate as f64),
+                    pipeline::fmt_bytes(insize),
+                    pipeline::fmt_bytes(c.bytes),
+                    t.elapsed().as_secs_f64()
+                );
+            }
+            Err(e) => {
+                eprintln!("visgrok: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     if let Some(p) = &args.info {
         if let Err(e) = info(p) {
             eprintln!("visgrok: {}: {e}", p.display());
@@ -280,14 +359,16 @@ fn info(path: &std::path::Path) -> std::io::Result<()> {
     use visgrok::stats::Stats;
     use visgrok::{EdgeDetector, Transition};
 
-    let mut r = VgkReader::open(path)?;
-    let m = r.meta().clone();
+    let mut r = visgrok::formats::open(path, &ReadOptions::default())?;
+    let m = r.info();
     let sr = m.samplerate as f64;
     println!("file:       {}", path.display());
     println!("device:     {}", m.device);
     println!("channels:   {} @ {}", m.channels, fmt_hz(sr));
-    for (k, v) in &m.extra {
-        println!("{k:<11} {v}");
+    if let Ok(v) = visgrok::vgk::VgkReader::open(path) {
+        for (k, v) in &v.meta().extra {
+            println!("{k:<11} {v}");
+        }
     }
     let n = m.channels;
     let mask = visgrok::block::channel_mask(n);
@@ -300,9 +381,9 @@ fn info(path: &std::path::Path) -> std::io::Result<()> {
     let mut samples = 0u64;
     // Bucket size: aim for ~60 columns; computed once the total is known
     // (from the index) or default to one second.
-    let total = visgrok::vgk::total_samples(path)?.unwrap_or(m.samplerate * 60);
+    let total = visgrok::vgk::total_samples(path).ok().flatten().unwrap_or(m.samplerate * 60);
     let bucket = (total / 60).max(1);
-    while let Some(b) = r.read_block()? {
+    while let Some(b) = r.next_block()? {
         if first_state.is_none() {
             let s = b.sample(0) & mask;
             first_state = Some(s);
@@ -327,11 +408,21 @@ fn info(path: &std::path::Path) -> std::io::Result<()> {
         samples = b.end();
     }
     buckets.resize(samples.div_ceil(bucket) as usize, vec![0; n]);
-    println!("duration:   {:.3} s ({} samples){}", samples as f64 / sr, samples, if r.truncated { ", file truncated" } else { "" });
+    println!("duration:   {:.3} s ({} samples)", samples as f64 / sr, samples);
+    // Without an index the total was a guess: merge columns down to ~60.
+    let mut bucket = bucket;
+    if buckets.len() > 70 {
+        let k = buckets.len().div_ceil(60);
+        buckets = buckets
+            .chunks(k)
+            .map(|g| (0..n).map(|ch| g.iter().map(|b| b[ch]).sum()).collect())
+            .collect();
+        bucket *= k as u64;
+    }
     println!();
     println!("{:<8} {:>5} {:>12} {:>14} {:>7} {:>11}  first/last edge", "channel", "start", "edges", "frequency", "duty", "min pulse");
     for (i, c) in stats.channels.iter().enumerate() {
-        let name = m.names.get(i).cloned().unwrap_or_else(|| format!("D{i}"));
+        let name = m.name(i);
         let start = first_state.map_or("-", |s| if s >> i & 1 != 0 { "HIGH" } else { "low" });
         let freq = c.median_period().map(|p| fmt_hz(sr / p as f64)).unwrap_or_default();
         let duty = c.duty().map(|d| format!("{:.1}%", d * 100.0)).unwrap_or_default();
@@ -345,7 +436,7 @@ fn info(path: &std::path::Path) -> std::io::Result<()> {
     println!();
     println!("activity ({:.2} s per column; ' ' none, ░▒▓█ increasing edge rate):", bucket as f64 / sr);
     for i in 0..n {
-        let name = m.names.get(i).cloned().unwrap_or_else(|| format!("D{i}"));
+        let name = m.name(i);
         let max = buckets.iter().map(|b| b[i]).max().unwrap_or(0);
         let line: String = buckets
             .iter()

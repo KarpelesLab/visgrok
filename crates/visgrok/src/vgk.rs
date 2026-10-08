@@ -19,18 +19,15 @@
 //! total sample count in `first_sample`. A file cut short by a crash is still
 //! readable up to its last complete chunk; the index is only an accelerator.
 
-use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
-use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
 
 use compcol::vec::{compress_to_vec_with, decompress_to_vec_capped};
 use compcol::zstd::{EncoderConfig, Zstd};
 
 use crate::block::Block;
+use crate::pool::OrderedPool;
 use crate::source::{CaptureInfo, Source};
 use crate::srzip::crc32;
 
@@ -90,7 +87,7 @@ impl Meta {
             channels: info.channels,
             samplerate: info.samplerate,
             unit_size: info.unit_size,
-            names: (0..info.channels).map(|i| format!("D{i}")).collect(),
+            names: info.all_names(),
             started_ms: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_millis() as u64),
@@ -172,7 +169,6 @@ fn encode_chunk(first: u64, raw: &[u8], compress: bool) -> Vec<u8> {
 }
 
 struct Job {
-    seq: u64,
     first: u64,
     data: Vec<u8>,
     compress: bool,
@@ -189,12 +185,8 @@ pub struct VgkWriter<W: Write + Send + 'static> {
     samples: u64,
     /// First sample of the chunk being filled.
     chunk_first: u64,
-    next_seq: u64,
-    next_write: u64,
-    pending: BTreeMap<u64, (u64, Vec<u8>)>,
-    jobs: Option<Sender<Job>>,
-    done: Receiver<(u64, u64, Vec<u8>)>,
-    workers: Vec<JoinHandle<()>>,
+    /// Encodes chunks; yields (raw length, encoded chunk) in order.
+    pool: OrderedPool<Job, (u64, Vec<u8>)>,
     index: Vec<(u64, u64)>,
     raw_written: u64,
     stored_chunks: u64,
@@ -219,31 +211,9 @@ impl<W: Write + Send + 'static> VgkWriter<W> {
         h.extend_from_slice(text.as_bytes());
         h.extend_from_slice(&crc32(text.as_bytes()).to_le_bytes());
         out.write_all(&h)?;
-
-        let threads = threads.unwrap_or_else(|| {
-            std::thread::available_parallelism().map_or(2, |n| n.get().saturating_sub(4).clamp(1, 6))
+        let pool = OrderedPool::new(threads, |job: Job| {
+            (job.data.len() as u64, encode_chunk(job.first, &job.data, job.compress))
         });
-        let (jtx, jrx) = channel::<Job>();
-        let jrx = Arc::new(Mutex::new(jrx));
-        let (dtx, drx) = channel();
-        let workers = (0..threads)
-            .map(|_| {
-                let jrx = jrx.clone();
-                let dtx = dtx.clone();
-                std::thread::spawn(move || {
-                    loop {
-                        let job = match jrx.lock().unwrap().recv() {
-                            Ok(j) => j,
-                            Err(_) => return,
-                        };
-                        let bytes = encode_chunk(job.first, &job.data, job.compress);
-                        if dtx.send((job.seq, job.data.len() as u64, bytes)).is_err() {
-                            return;
-                        }
-                    }
-                })
-            })
-            .collect();
         let unit = meta.unit_size;
         let chunk_size = (chunk_size / unit).max(1) * unit;
         Ok(VgkWriter {
@@ -254,12 +224,7 @@ impl<W: Write + Send + 'static> VgkWriter<W> {
             chunk_size,
             samples: 0,
             chunk_first: 0,
-            next_seq: 0,
-            next_write: 0,
-            pending: BTreeMap::new(),
-            jobs: Some(jtx),
-            done: drx,
-            workers,
+            pool,
             index: Vec::new(),
             raw_written: 0,
             stored_chunks: 0,
@@ -295,66 +260,45 @@ impl<W: Write + Send + 'static> VgkWriter<W> {
             self.chunk.extend_from_slice(&data[..n]);
             data = &data[n..];
             if self.chunk.len() == self.chunk_size {
-                self.submit()?;
+                self.submit();
             }
         }
         self.collect(false)
     }
 
-    fn submit(&mut self) -> io::Result<()> {
+    fn submit(&mut self) {
         if self.chunk.is_empty() {
-            return Ok(());
+            return;
         }
         let data = std::mem::replace(&mut self.chunk, Vec::with_capacity(self.chunk_size));
         let first = self.chunk_first;
         self.chunk_first += (data.len() / self.unit_size) as u64;
         // When compression cannot keep up, store chunks as they are rather
         // than stall the capture.
-        let backlog = (self.next_seq - self.next_write) as usize;
-        let compress = backlog < MAX_BACKLOG;
+        let compress = self.pool.in_flight() < MAX_BACKLOG;
         if !compress {
             self.stored_chunks += 1;
         }
-        let job = Job { seq: self.next_seq, first, data, compress };
-        self.next_seq += 1;
-        self.jobs.as_ref().expect("writer finished").send(job).map_err(|_| io::Error::other("compression worker died"))
+        self.pool.submit(Job { first, data, compress });
     }
 
     /// Writes finished chunks in order; with `all`, waits for every one.
     fn collect(&mut self, all: bool) -> io::Result<()> {
-        loop {
-            while let Some((raw, bytes)) = self.pending.remove(&self.next_write) {
-                let first = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
-                self.index.push((self.pos, first));
-                self.out.write_all(&bytes)?;
-                self.pos += bytes.len() as u64;
-                self.raw_written += raw;
-                self.next_write += 1;
-            }
-            if self.next_write == self.next_seq {
-                return Ok(());
-            }
-            let got = if all {
-                self.done.recv().map_err(|_| io::Error::other("compression worker died"))?
-            } else {
-                match self.done.try_recv() {
-                    Ok(v) => v,
-                    Err(_) => return Ok(()),
-                }
-            };
-            self.pending.insert(got.0, (got.1, got.2));
+        while let Some((raw, bytes)) = self.pool.next(all) {
+            let first = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
+            self.index.push((self.pos, first));
+            self.out.write_all(&bytes)?;
+            self.pos += bytes.len() as u64;
+            self.raw_written += raw;
         }
+        Ok(())
     }
 
     /// Flushes everything, writes the index and footer, and returns the
     /// underlying writer.
     pub fn finish(mut self) -> io::Result<W> {
-        self.submit()?;
+        self.submit();
         self.collect(true)?;
-        self.jobs = None;
-        for w in std::mem::take(&mut self.workers) {
-            let _ = w.join();
-        }
         let mut payload = Vec::with_capacity(self.index.len() * 16);
         for (off, first) in &self.index {
             payload.extend_from_slice(&off.to_le_bytes());
@@ -510,10 +454,11 @@ impl<R: Read> VgkReader<R> {
 impl<R: Read + Send> Source for VgkReader<R> {
     fn info(&self) -> CaptureInfo {
         CaptureInfo {
-            device: format!("replay: {}", self.meta.device),
+            device: self.meta.device.clone(),
             channels: self.meta.channels,
             samplerate: self.meta.samplerate,
             unit_size: self.meta.unit_size,
+            names: self.meta.names.clone(),
         }
     }
 

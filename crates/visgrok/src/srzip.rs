@@ -2,14 +2,20 @@
 //!
 //! A `.sr` file is a zip archive holding `version`, `metadata` and the logic
 //! data split into `logic-1-<n>` chunks of raw samples. Chunks are buffered in
-//! memory and written as stored (uncompressed) entries as soon as they are
-//! full, so a capture of any length streams to disk with bounded memory.
-//! Zip64 records are emitted when the archive grows past 4 GiB or 65535
-//! entries.
+//! memory and written as soon as they are full, so a capture of any length
+//! streams to disk with bounded memory: stored (fast, for live capture) or
+//! deflated on worker threads (smaller, as sigrok itself writes them; a
+//! chunk that doesn't shrink is stored). Zip64 records are emitted when the
+//! archive grows past 4 GiB or 65535 entries.
 
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
+
+use compcol::deflate::{Deflate, EncoderConfig};
+use compcol::vec::compress_to_vec_with;
+
+use crate::pool::OrderedPool;
 
 /// Default chunk size, in bytes.
 pub const DEFAULT_CHUNK: usize = 4 << 20;
@@ -17,8 +23,36 @@ pub const DEFAULT_CHUNK: usize = 4 << 20;
 struct Entry {
     name: String,
     crc: u32,
-    size: u64,
+    method: u16,
+    raw: u64,
+    stored: u64,
     offset: u64,
+}
+
+/// How `.sr` data chunks are stored.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SrCompression {
+    /// Uncompressed (fastest; the live-capture default).
+    Store,
+    /// Deflate level 1 on worker threads (what sigrok writes, much smaller).
+    Deflate,
+}
+
+/// An encoded zip entry: (name, crc, method, raw length, payload).
+type Encoded = (String, u32, u16, u64, Vec<u8>);
+
+fn encode(name: String, data: Vec<u8>, deflate: bool) -> Encoded {
+    let crc = crc32(&data);
+    if deflate {
+        let mut cfg = EncoderConfig::default();
+        cfg.level = 1;
+        if let Ok(p) = compress_to_vec_with::<Deflate>(&data, cfg)
+            && p.len() < data.len()
+        {
+            return (name, crc, 8, data.len() as u64, p);
+        }
+    }
+    (name, crc, 0, data.len() as u64, data)
 }
 
 /// Writes a sigrok session file incrementally.
@@ -31,6 +65,8 @@ pub struct SrZipWriter<W: Write> {
     unit_size: usize,
     next_chunk: u32,
     samples: u64,
+    raw_written: u64,
+    pool: Option<OrderedPool<(String, Vec<u8>), Encoded>>,
 }
 
 impl SrZipWriter<BufWriter<File>> {
@@ -43,6 +79,21 @@ impl SrZipWriter<BufWriter<File>> {
     ) -> io::Result<SrZipWriter<BufWriter<File>>> {
         let f = BufWriter::with_capacity(1 << 20, File::create(path)?);
         SrZipWriter::new(f, channels, samplerate, unit_size, DEFAULT_CHUNK)
+    }
+
+    /// Like [`SrZipWriter::create`], with a choice of chunk compression.
+    pub fn create_with(
+        path: impl AsRef<Path>,
+        channels: &[String],
+        samplerate: u64,
+        unit_size: usize,
+        compression: SrCompression,
+    ) -> io::Result<SrZipWriter<BufWriter<File>>> {
+        let mut w = Self::create(path, channels, samplerate, unit_size)?;
+        if compression == SrCompression::Deflate {
+            w.pool = Some(OrderedPool::new(None, |(name, data): (String, Vec<u8>)| encode(name, data, true)));
+        }
+        Ok(w)
     }
 }
 
@@ -66,6 +117,8 @@ impl<W: Write> SrZipWriter<W> {
             unit_size,
             next_chunk: 1,
             samples: 0,
+            raw_written: 0,
+            pool: None,
         };
         w.entry("version", b"2")?;
         let mut meta = String::from("[global]\nsigrok version=0.5.2\n\n[device 1]\ncapturefile=logic-1\n");
@@ -88,6 +141,11 @@ impl<W: Write> SrZipWriter<W> {
         self.pos
     }
 
+    /// Raw sample bytes committed to the output so far.
+    pub fn raw_written(&self) -> u64 {
+        self.raw_written
+    }
+
     /// Appends packed samples (`unit_size` bytes each).
     pub fn write(&mut self, mut data: &[u8]) -> io::Result<()> {
         debug_assert_eq!(data.len() % self.unit_size, 0);
@@ -101,6 +159,15 @@ impl<W: Write> SrZipWriter<W> {
                 self.flush_chunk()?;
             }
         }
+        self.collect(false)
+    }
+
+    /// Writes chunks the workers have finished, in order.
+    fn collect(&mut self, all: bool) -> io::Result<()> {
+        while let Some((name, crc, method, raw, payload)) = self.pool.as_mut().and_then(|p| p.next(all)) {
+            self.raw_written += raw;
+            self.entry_encoded(&name, crc, method, raw, &payload)?;
+        }
         Ok(())
     }
 
@@ -110,7 +177,20 @@ impl<W: Write> SrZipWriter<W> {
         }
         let name = format!("logic-1-{}", self.next_chunk);
         self.next_chunk += 1;
+        if let Some(pool) = &mut self.pool {
+            // Under backlog, ship chunks stored rather than queue unboundedly.
+            if pool.in_flight() < 48 {
+                let chunk = std::mem::replace(&mut self.chunk, Vec::with_capacity(self.chunk_size));
+                pool.submit((name, chunk));
+                return Ok(());
+            }
+            self.collect(true)?;
+            let chunk = std::mem::replace(&mut self.chunk, Vec::with_capacity(self.chunk_size));
+            self.pool.as_mut().unwrap().submit((name, chunk));
+            return Ok(());
+        }
         let chunk = std::mem::take(&mut self.chunk);
+        self.raw_written += chunk.len() as u64;
         self.entry(&name, &chunk)?;
         self.chunk = chunk;
         self.chunk.clear();
@@ -124,30 +204,34 @@ impl<W: Write> SrZipWriter<W> {
     }
 
     fn entry(&mut self, name: &str, data: &[u8]) -> io::Result<()> {
-        let crc = crc32(data);
+        self.entry_encoded(name, crc32(data), 0, data.len() as u64, data)
+    }
+
+    fn entry_encoded(&mut self, name: &str, crc: u32, method: u16, raw: u64, payload: &[u8]) -> io::Result<()> {
         let offset = self.pos;
         let mut h = Vec::with_capacity(30 + name.len());
         h.extend_from_slice(&0x04034b50u32.to_le_bytes());
         h.extend_from_slice(&20u16.to_le_bytes()); // version needed
         h.extend_from_slice(&0u16.to_le_bytes()); // flags
-        h.extend_from_slice(&0u16.to_le_bytes()); // method: stored
+        h.extend_from_slice(&method.to_le_bytes()); // 0 stored, 8 deflate
         h.extend_from_slice(&0u16.to_le_bytes()); // time
         h.extend_from_slice(&0x21u16.to_le_bytes()); // date: 1980-01-01
         h.extend_from_slice(&crc.to_le_bytes());
-        h.extend_from_slice(&(data.len() as u32).to_le_bytes());
-        h.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        h.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        h.extend_from_slice(&(raw as u32).to_le_bytes());
         h.extend_from_slice(&(name.len() as u16).to_le_bytes());
         h.extend_from_slice(&0u16.to_le_bytes());
         h.extend_from_slice(name.as_bytes());
         self.put(&h)?;
-        self.put(data)?;
-        self.entries.push(Entry { name: name.to_string(), crc, size: data.len() as u64, offset });
+        self.put(payload)?;
+        self.entries.push(Entry { name: name.to_string(), crc, method, raw, stored: payload.len() as u64, offset });
         Ok(())
     }
 
     /// Flushes the last chunk and writes the zip central directory.
     pub fn finish(mut self) -> io::Result<W> {
         self.flush_chunk()?;
+        self.collect(true)?;
         let cd_start = self.pos;
         let entries = std::mem::take(&mut self.entries);
         for e in &entries {
@@ -156,13 +240,13 @@ impl<W: Write> SrZipWriter<W> {
             h.extend_from_slice(&0x02014b50u32.to_le_bytes());
             h.extend_from_slice(&(if big { 45u16 } else { 20 }).to_le_bytes()); // made by
             h.extend_from_slice(&(if big { 45u16 } else { 20 }).to_le_bytes()); // needed
-            h.extend_from_slice(&0u16.to_le_bytes());
-            h.extend_from_slice(&0u16.to_le_bytes());
-            h.extend_from_slice(&0u16.to_le_bytes());
+            h.extend_from_slice(&0u16.to_le_bytes()); // flags
+            h.extend_from_slice(&e.method.to_le_bytes());
+            h.extend_from_slice(&0u16.to_le_bytes()); // time
             h.extend_from_slice(&0x21u16.to_le_bytes());
             h.extend_from_slice(&e.crc.to_le_bytes());
-            h.extend_from_slice(&(e.size as u32).to_le_bytes());
-            h.extend_from_slice(&(e.size as u32).to_le_bytes());
+            h.extend_from_slice(&(e.stored as u32).to_le_bytes());
+            h.extend_from_slice(&(e.raw as u32).to_le_bytes());
             h.extend_from_slice(&(e.name.len() as u16).to_le_bytes());
             h.extend_from_slice(&(if big { 12u16 } else { 0 }).to_le_bytes()); // extra
             h.extend_from_slice(&0u16.to_le_bytes()); // comment

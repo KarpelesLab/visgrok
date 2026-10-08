@@ -265,7 +265,7 @@ fn resample_multi(states: &[u8], per: f64) -> Vec<u8> {
 
 impl Source for Synth {
     fn info(&self) -> CaptureInfo {
-        CaptureInfo { device: "synthetic".into(), channels: 8, samplerate: self.samplerate, unit_size: 1 }
+        CaptureInfo { device: "synthetic".into(), channels: 8, samplerate: self.samplerate, unit_size: 1, names: Vec::new() }
     }
 
     fn next_block(&mut self) -> io::Result<Option<Block>> {

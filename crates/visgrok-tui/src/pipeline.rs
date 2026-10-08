@@ -17,8 +17,7 @@ use std::time::Instant;
 use visgrok::analyzer::{Analyzer, DecoderOptions, Tagged};
 use visgrok::decode::Event;
 use visgrok::roles::Role;
-use visgrok::srzip::SrZipWriter;
-use visgrok::vgk::{Meta, VgkWriter};
+use visgrok::formats::{SampleWriter, WriteOptions};
 use visgrok::{Block, CaptureInfo, Source};
 
 /// What to start a pipeline with besides the source and output.
@@ -389,11 +388,8 @@ pub fn fmt_bytes(n: u64) -> String {
     }
 }
 
-/// An output file in either supported format.
-enum Recorder {
-    Sr(SrZipWriter<std::io::BufWriter<std::fs::File>>),
-    Vgk(VgkWriter<std::io::BufWriter<std::fs::File>>),
-}
+/// An output file in any supported format.
+struct Recorder(Box<dyn SampleWriter>);
 
 impl Recorder {
     fn create(
@@ -402,41 +398,25 @@ impl Recorder {
         names: &[String],
         extra: Vec<(String, String)>,
     ) -> std::io::Result<Recorder> {
-        if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("sr")) {
-            Ok(Recorder::Sr(SrZipWriter::create(path, names, info.samplerate, info.unit_size)?))
-        } else {
-            let mut meta = Meta::from_info(info);
-            meta.extra = extra;
-            meta.names = names.to_vec();
-            Ok(Recorder::Vgk(VgkWriter::create(path, &meta)?))
-        }
+        let mut info = info.clone();
+        info.names = names.to_vec();
+        let opts = WriteOptions { extra, ..Default::default() };
+        Ok(Recorder(visgrok::formats::create(path, &info, &opts)?))
     }
 
     fn write(&mut self, data: &[u8]) -> std::io::Result<()> {
-        match self {
-            Recorder::Sr(w) => w.write(data),
-            Recorder::Vgk(w) => w.write(data),
-        }
+        self.0.write(data)
     }
 
     fn bytes_written(&self) -> u64 {
-        match self {
-            Recorder::Sr(w) => w.bytes_written(),
-            Recorder::Vgk(w) => w.bytes_written(),
-        }
+        self.0.bytes_written()
     }
 
     fn raw_written(&self) -> u64 {
-        match self {
-            Recorder::Sr(w) => w.bytes_written(),
-            Recorder::Vgk(w) => w.raw_written(),
-        }
+        self.0.raw_written()
     }
 
     fn finish(self) -> std::io::Result<()> {
-        match self {
-            Recorder::Sr(w) => w.finish().map(drop),
-            Recorder::Vgk(w) => w.finish().map(drop),
-        }
+        self.0.finish()
     }
 }

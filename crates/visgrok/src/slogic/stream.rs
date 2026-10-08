@@ -396,6 +396,7 @@ impl Source for Capture {
             channels: self.cfg.channels,
             samplerate: self.cfg.samplerate,
             unit_size: crate::block::unit_size_for(self.cfg.channels),
+            names: Vec::new(),
         }
     }
 
