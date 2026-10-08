@@ -22,9 +22,10 @@ pub struct Args {
     /// Output file (sigrok session, .sr). Nothing is written when omitted.
     #[arg(short, long)]
     output: Option<PathBuf>,
-    /// Sample rate, e.g. 20M, 100M, 400k.
-    #[arg(short, long, default_value = "20M", value_parser = parse_rate)]
-    samplerate: u64,
+    /// Sample rate, e.g. 20M, 100M. Defaults to the device's maximum for the
+    /// channel count (16ch: 200M, 8ch: 400M, 4ch: 800M); 20M with --demo.
+    #[arg(short, long, value_parser = parse_rate)]
+    samplerate: Option<u64>,
     /// Number of channels to capture (4, 8 or 16).
     #[arg(short, long, default_value_t = 16)]
     channels: usize,
@@ -68,14 +69,16 @@ fn parse_rate(s: &str) -> Result<u64, String> {
 }
 
 fn open_source(args: &Args) -> Result<Box<dyn Source>, String> {
-    let limit = args.duration.map(|d| (d * args.samplerate as f64) as u64);
+    let limit = |rate: u64| args.duration.map(|d| (d * rate as f64) as u64);
     if args.demo {
-        return Ok(Box::new(Synth::new(args.samplerate, limit)));
+        let rate = args.samplerate.unwrap_or(20_000_000);
+        return Ok(Box::new(Synth::new(rate, limit(rate))));
     }
     let dev = SLogic::open(args.serial.as_deref()).map_err(|e| e.to_string())?;
-    let mut cfg = Config::new(args.channels, args.samplerate);
+    let rate = args.samplerate.unwrap_or_else(|| dev.model().max_samplerate(args.channels));
+    let mut cfg = Config::new(args.channels, rate);
     cfg.threshold = args.threshold;
-    cfg.limit = limit;
+    cfg.limit = limit(rate);
     if args.emulation {
         cfg.pattern = Pattern::Emulation;
     }

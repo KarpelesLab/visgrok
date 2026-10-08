@@ -15,8 +15,8 @@ See [docs/PROTOCOL.md](docs/PROTOCOL.md) for the USB protocol and
 ```sh
 cargo build --release
 ./target/release/visgrok --list
-# 16 channels at 50 MHz, 1.65 V threshold, record to disk, auto-detect roles:
-./target/release/visgrok -c 16 -s 50M -t 1.65 -o capture.sr --auto
+# 16 channels at the maximum rate (200 MHz), 1.65 V threshold, record, auto-detect roles:
+./target/release/visgrok -c 16 -t 1.65 -o capture.sr --auto
 # No hardware: synthetic UART/I2C/SPI/clock signals
 ./target/release/visgrok --demo --auto
 # Verify the USB link: device test pattern checked sample by sample
