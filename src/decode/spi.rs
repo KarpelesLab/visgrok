@@ -5,6 +5,7 @@ use crate::edges::Transition;
 
 /// SPI bus configuration.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct SpiConfig {
     /// Clock channel.
     pub clk: u8,

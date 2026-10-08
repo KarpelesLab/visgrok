@@ -31,6 +31,7 @@ struct Entry {
 
 /// How `.sr` data chunks are stored.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SrCompression {
     /// Uncompressed (fastest; the live-capture default).
     Store,
@@ -307,7 +308,7 @@ impl<W: Write> SrZipWriter<W> {
 }
 
 /// Formats a sample rate the way sigrok does (`"24 MHz"`, `"1500 kHz"`).
-pub fn samplerate_string(hz: u64) -> String {
+pub(crate) fn samplerate_string(hz: u64) -> String {
     if hz >= 1_000_000_000 && hz.is_multiple_of(1_000_000_000) {
         format!("{} GHz", hz / 1_000_000_000)
     } else if hz >= 1_000_000 && hz.is_multiple_of(1_000_000) {
@@ -348,7 +349,7 @@ const fn crc_tables() -> [[u32; 256]; 8] {
 static CRC: [[u32; 256]; 8] = crc_tables();
 
 /// CRC-32 (IEEE), slicing-by-8.
-pub fn crc32(data: &[u8]) -> u32 {
+pub(crate) fn crc32(data: &[u8]) -> u32 {
     let mut c = !0u32;
     let (chunks, rest) = data.as_chunks::<8>();
     for b in chunks {

@@ -111,7 +111,7 @@ impl EdgeDetector {
 /// samples apart cancel each other. Returns the remaining changes, starting
 /// from `state` (the line state before the first transition), and the state
 /// after them.
-pub fn deglitch(transitions: &[Transition], state: Sample, glitch: u64) -> (Vec<Transition>, Sample) {
+pub(crate) fn deglitch(transitions: &[Transition], state: Sample, glitch: u64) -> (Vec<Transition>, Sample) {
     if glitch == 0 || transitions.is_empty() {
         let end = transitions.last().map_or(state, |t| t.now);
         return (transitions.to_vec(), end);

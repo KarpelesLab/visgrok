@@ -22,6 +22,7 @@ const PROTO: &str = "SD";
 
 /// SD bus pins.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct SdConfig {
     /// Clock.
     pub clk: u8,
@@ -29,6 +30,13 @@ pub struct SdConfig {
     pub cmd: u8,
     /// DAT0..DAT3 (DAT0 is needed for data; DAT1..3 for 4-bit transfers).
     pub dat: [Option<u8>; 4],
+}
+
+impl SdConfig {
+    /// Pins: clock, command line and DAT0..DAT3 (unassigned lines `None`).
+    pub fn new(clk: u8, cmd: u8, dat: [Option<u8>; 4]) -> SdConfig {
+        SdConfig { clk, cmd, dat }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

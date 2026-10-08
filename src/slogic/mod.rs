@@ -44,6 +44,7 @@ mod aux {
 
 /// Supported models.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Model {
     /// SLogic16 U3: 16 channels, USB 3, up to 800 MHz (4 ch).
     SLogic16U3,
@@ -137,6 +138,7 @@ impl Model {
 
 /// A discovered device.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Found {
     /// Model.
     pub model: Model,
@@ -165,6 +167,7 @@ impl fmt::Display for Found {
 
 /// Driver errors.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Error {
     /// USB failure.
     Usb(rawusb::Error),
@@ -212,6 +215,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// Device test-pattern modes (U3 models).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Pattern {
     /// Real inputs.
     Normal = 0,
@@ -223,6 +227,7 @@ pub enum Pattern {
 
 /// How to convert a threshold voltage into a DAC code.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ThresholdModel {
     /// Linear fit measured on real hardware: `V = 0.005166 * code + 0.4318`.
     Measured,
@@ -232,6 +237,7 @@ pub enum ThresholdModel {
 
 /// Capture settings.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Config {
     /// Channels to capture: 4, 8 or 16 (channels D0..D(n-1)).
     pub channels: usize,
@@ -377,6 +383,7 @@ impl SLogic {
     }
 
     /// Reads a 32-bit register (U3 models).
+    #[doc(hidden)]
     pub fn reg_read(&self, addr: u16) -> Result<u32> {
         let mut b = [0u8; 4];
         let n = self.handle.control_read(0xc0, 0x00, addr, 0, &mut b, CTRL_TIMEOUT)?;
@@ -387,6 +394,7 @@ impl SLogic {
     }
 
     /// Writes a 32-bit register (U3 models).
+    #[doc(hidden)]
     pub fn reg_write(&self, addr: u16, value: u32) -> Result<()> {
         let n = self.handle.control_write(0x40, 0x01, addr, 0, &value.to_le_bytes(), CTRL_TIMEOUT)?;
         if n != 4 {

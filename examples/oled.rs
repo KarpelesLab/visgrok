@@ -16,10 +16,8 @@ fn main() -> std::io::Result<()> {
         roles[cs.parse::<usize>().unwrap()] = Role::SpiCs;
     }
     let mut an = Analyzer::new(info.channels, info.samplerate);
-    let opts = DecoderOptions {
-        spi_protocol: SpiProtocol::Ssd1306 { width: 128, height: 64 },
-        ..Default::default()
-    };
+    let mut opts = DecoderOptions::default();
+    opts.spi_protocol = SpiProtocol::Ssd1306 { width: 128, height: 64 };
     let d = an.decoders_for_roles(&roles, &opts);
     an.set_decoders(d);
     while let Some(b) = src.next_block()? {

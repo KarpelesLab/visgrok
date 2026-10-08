@@ -20,8 +20,9 @@ pub mod decode;
 pub mod edges;
 pub mod formats;
 pub mod inspect;
+#[doc(hidden)]
 pub mod json;
-pub mod pool;
+mod pool;
 pub mod roles;
 pub mod sidecar;
 pub mod slogic;

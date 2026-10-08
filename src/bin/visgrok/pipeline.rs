@@ -223,17 +223,7 @@ impl Pipeline {
                                 .filter(|t| !matches!(t.annotation.event, Event::Frame(_)))
                                 .map(|t| {
                                     let (source, channel) = names.get(t.decoder).cloned().unwrap_or((Arc::from("?"), 0));
-                                    StoredEvent {
-                                        start: t.annotation.start,
-                                        end: t.annotation.end,
-                                        source,
-                                        channel,
-                                        text: format_event(&t.annotation.event),
-                                        data: match &t.annotation.event {
-                                            visgrok::decode::Event::Protocol { data, .. } => data.clone(),
-                                            _ => None,
-                                        },
-                                    }
+                                    StoredEvent::from_annotation(&t.annotation, source, channel)
                                 }),
                         );
                     }
@@ -390,56 +380,7 @@ impl Pipeline {
 pub fn format_annotation(t: &Tagged, names: &[String], samplerate: u64) -> String {
     let ts = t.annotation.start as f64 / samplerate as f64;
     let name = names.get(t.decoder).map(String::as_str).unwrap_or("?");
-    format!("{ts:12.6}s {name:<24} {}", format_event(&t.annotation.event))
-}
-
-/// Renders a decoded event.
-pub fn format_event(e: &Event) -> String {
-    match e {
-        Event::UartByte {
-            value,
-            framing_error,
-            parity_error,
-        } => {
-            let c = char::from_u32(*value as u32).filter(|c| c.is_ascii_graphic() || *c == ' ');
-            let mut s = match c {
-                Some(c) => format!("{value:02x} '{c}'"),
-                None => format!("{value:02x}"),
-            };
-            if *framing_error {
-                s += " [framing error]";
-            }
-            if *parity_error {
-                s += " [parity error]";
-            }
-            s
-        }
-        Event::UartBreak => "BREAK".into(),
-        Event::I2cStart => "START".into(),
-        Event::I2cStop => "STOP".into(),
-        Event::I2cAddress { addr, read, ack } => {
-            format!(
-                "addr {addr:#04x} {} {}",
-                if *read { "R" } else { "W" },
-                if *ack { "ACK" } else { "NAK" }
-            )
-        }
-        Event::I2cData { value, ack } => format!("data {value:02x} {}", if *ack { "ACK" } else { "NAK" }),
-        Event::SpiSelect(true) => "CS asserted".into(),
-        Event::SpiSelect(false) => "CS released".into(),
-        Event::SpiWord { mosi, miso, dc } => {
-            let f = |v: &Option<u32>| v.map_or("--".to_string(), |v| format!("{v:02x}"));
-            let mut s = format!("mosi {} miso {}", f(mosi), f(miso));
-            if let Some(dc) = dc {
-                s += if *dc { " [data]" } else { " [cmd]" };
-            }
-            s
-        }
-        Event::UartBaud { baud } => format!("── baud rate {baud} ──"),
-        Event::UartFormat { format } => format!("── frame format {format} ──"),
-        Event::Protocol { text, .. } => text.clone(),
-        Event::Frame(v) => format!("{} screen update {}", v.title, v.updates),
-    }
+    format!("{ts:12.6}s {name:<24} {}", t.annotation.event)
 }
 
 /// Formats a byte count.
@@ -463,10 +404,8 @@ impl Recorder {
     fn create(path: &std::path::Path, info: &CaptureInfo, names: &[String], extra: Vec<(String, String)>) -> std::io::Result<Recorder> {
         let mut info = info.clone();
         info.names = names.to_vec();
-        let opts = WriteOptions {
-            extra,
-            ..Default::default()
-        };
+        let mut opts = WriteOptions::default();
+        opts.extra = extra;
         Ok(Recorder(visgrok::formats::create(path, &info, &opts)?))
     }
 

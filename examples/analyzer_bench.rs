@@ -24,10 +24,8 @@ fn main() {
         Role::SpiMosi,
         Role::Unknown,
     ];
-    let opts = DecoderOptions {
-        spi_protocol: SpiProtocol::Ssd1306 { width: 128, height: 64 },
-        ..Default::default()
-    };
+    let mut opts = DecoderOptions::default();
+    opts.spi_protocol = SpiProtocol::Ssd1306 { width: 128, height: 64 };
     let d = a.decoders_for_roles(&roles, &opts);
     a.set_decoders(d);
     let t = Instant::now();

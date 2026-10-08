@@ -53,6 +53,7 @@ fn main() -> std::io::Result<()> {
                 value,
                 framing_error,
                 parity_error,
+                ..
             } => println!(
                 "{t:.6}s {value:02x}{}{}",
                 if *framing_error { " FRAMING" } else { "" },

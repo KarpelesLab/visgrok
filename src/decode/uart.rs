@@ -23,6 +23,7 @@ use crate::edges::Transition;
 
 /// Parity mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Parity {
     /// No parity bit.
     None,
@@ -34,6 +35,7 @@ pub enum Parity {
 
 /// UART line settings.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct UartConfig {
     /// Channel number.
     pub channel: u8,
@@ -97,7 +99,7 @@ impl UartConfig {
 
 /// Rounds a measured rate for display: standard rates within 1.5% snap,
 /// others keep three significant digits.
-pub fn nice_baud(measured: f64) -> u32 {
+pub(crate) fn nice_baud(measured: f64) -> u32 {
     if let Some(b) = crate::roles::BAUD_RATES
         .iter()
         .copied()
@@ -211,9 +213,6 @@ pub struct Uart {
     /// Baud rate last reported.
     announced: Option<u32>,
 }
-
-/// Kept for compatibility with the earlier name.
-pub type UartDecoder = Uart;
 
 impl Uart {
     /// Creates a decoder for a stream sampled at `samplerate` Hz.

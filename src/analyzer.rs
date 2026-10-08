@@ -16,12 +16,13 @@ use crate::roles::{self, Correlator, Role, Suggestion};
 use crate::stats::Stats;
 
 /// How many recent transitions are kept for waveform display.
-pub const WAVE_HISTORY: usize = 1 << 16;
+pub(crate) const WAVE_HISTORY: usize = 1 << 16;
 /// How many recent annotations are kept.
-pub const ANNOTATION_HISTORY: usize = 1 << 16;
+pub(crate) const ANNOTATION_HISTORY: usize = 1 << 16;
 
 /// Higher-level protocol carried over SPI.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SpiProtocol {
     /// Plain SPI words.
     Raw,
@@ -66,6 +67,7 @@ impl SpiProtocol {
 
 /// Higher-level protocol carried over UART.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum UartProtocol {
     /// Plain bytes.
     #[default]
@@ -93,8 +95,10 @@ impl UartProtocol {
     }
 }
 
-/// Settings applied when building decoders from roles.
+/// Settings applied when building decoders from roles. Start from
+/// [`DecoderOptions::default`] and set the fields to change.
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct DecoderOptions {
     /// SPI mode (0..=3); `None` infers CPOL from the clock idle level.
     pub spi_mode: Option<u8>,
@@ -165,6 +169,7 @@ impl Default for DecoderOptions {
 
 /// An annotation tagged with the index of the decoder that produced it.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Tagged {
     /// Index into [`Analyzer::decoders`].
     pub decoder: usize,

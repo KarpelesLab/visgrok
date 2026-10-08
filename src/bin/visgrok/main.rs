@@ -158,11 +158,9 @@ fn parse_rate(s: &str) -> Result<u64, String> {
 fn open_source(args: &Args) -> Result<Box<dyn Source>, String> {
     let limit = |rate: u64| args.duration.map(|d| (d * rate as f64) as u64);
     if let Some(p) = &args.input {
-        let ropts = ReadOptions {
-            samplerate: args.samplerate,
-            channels: Some(args.channels),
-            format: None,
-        };
+        let mut ropts = ReadOptions::default();
+        ropts.samplerate = args.samplerate;
+        ropts.channels = Some(args.channels);
         let r = visgrok::formats::open(p, &ropts).map_err(|e| format!("{}: {e}", p.display()))?;
         return Ok(r);
     }
@@ -232,16 +230,13 @@ fn main() {
                 })
             })
         };
-        let ropts = ReadOptions {
-            samplerate: *samplerate,
-            channels: *channels,
-            format: fmt(from),
-        };
-        let wopts = WriteOptions {
-            sr_compression: if *sr_store { SrCompression::Store } else { SrCompression::Deflate },
-            format: fmt(to),
-            ..Default::default()
-        };
+        let mut ropts = ReadOptions::default();
+        ropts.samplerate = *samplerate;
+        ropts.channels = *channels;
+        ropts.format = fmt(from);
+        let mut wopts = WriteOptions::default();
+        wopts.sr_compression = if *sr_store { SrCompression::Store } else { SrCompression::Deflate };
+        wopts.format = fmt(to);
         let t = std::time::Instant::now();
         let mut last = std::time::Instant::now();
         // The sidecar travels with the capture.
@@ -334,19 +329,18 @@ fn main() {
             }
         }
     }
-    let options = DecoderOptions {
-        spi_mode: args.spi_mode,
-        spi_cs_active_high: args.spi_cs_high,
-        spi_protocol: args.spi_proto,
-        uart_auto: !args.uart_fixed,
-        uart_protocol: args.uart_proto,
-        uart_format: match parse_uart_format(&args.uart_format) {
-            Ok(f) => f,
-            Err(e) => {
-                eprintln!("visgrok: --uart-format: {e}");
-                std::process::exit(2);
-            }
-        },
+    let mut options = DecoderOptions::default();
+    options.spi_mode = args.spi_mode;
+    options.spi_cs_active_high = args.spi_cs_high;
+    options.spi_protocol = args.spi_proto;
+    options.uart_auto = !args.uart_fixed;
+    options.uart_protocol = args.uart_proto;
+    options.uart_format = match parse_uart_format(&args.uart_format) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("visgrok: --uart-format: {e}");
+            std::process::exit(2);
+        }
     };
     let mut names: Vec<Option<String>> = Vec::new();
     for spec in &args.names {
@@ -404,16 +398,14 @@ fn main() {
     // any roles changed in the TUI).
     let save_sidecar = |pipe: &Pipeline| {
         let (Some(out), None) = (&args.output, &args.input) else { return };
-        let sc = Sidecar {
-            capture: out.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default(),
-            names: pipe.names.clone(),
-            roles: pipe.roles.lock().unwrap().clone(),
-            options: pipe.options.lock().unwrap().clone(),
-            device: Some(pipe.info.device.clone()),
-            samplerate: Some(pipe.info.samplerate),
-            threshold: args.threshold,
-            ..Default::default()
-        };
+        let mut sc = Sidecar::default();
+        sc.capture = out.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+        sc.names = pipe.names.clone();
+        sc.roles = pipe.roles.lock().unwrap().clone();
+        sc.options = pipe.options.lock().unwrap().clone();
+        sc.device = Some(pipe.info.device.clone());
+        sc.samplerate = Some(pipe.info.samplerate);
+        sc.threshold = args.threshold;
         if let Err(e) = sc.save(out) {
             eprintln!("visgrok: saving sidecar: {e}");
         }

@@ -21,7 +21,7 @@ use crate::edges::Transition;
 const PROTO: &str = "ISO7816";
 
 /// Clock rate conversion factors, indexed by the Fi nibble (`None`: RFU).
-pub const FI: [Option<u32>; 16] = [
+pub(crate) const FI: [Option<u32>; 16] = [
     Some(372),
     Some(372),
     Some(558),
@@ -41,7 +41,7 @@ pub const FI: [Option<u32>; 16] = [
 ];
 
 /// Baud rate adjustment factors, indexed by the Di nibble (`None`: RFU).
-pub const DI: [Option<u32>; 16] = [
+pub(crate) const DI: [Option<u32>; 16] = [
     None,
     Some(1),
     Some(2),
@@ -61,7 +61,7 @@ pub const DI: [Option<u32>; 16] = [
 ];
 
 /// Describes a TA1 / PPS1 byte (`FI` high nibble, `DI` low nibble).
-pub fn fidi(b: u8) -> String {
+pub(crate) fn fidi(b: u8) -> String {
     let (f, d) = (FI[(b >> 4) as usize], DI[(b & 15) as usize]);
     match (f, d) {
         (Some(f), Some(d)) => format!("Fi={f} Di={d} (etu = {} clocks)", f as f64 / d as f64),

@@ -38,6 +38,7 @@ const CACHE_CHUNKS: usize = 8;
 
 /// Overview of [`TILE`] consecutive samples.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Tile {
     /// State at the first sample of the tile.
     pub first: Sample,
@@ -47,6 +48,7 @@ pub struct Tile {
 
 /// One column of a view, for one channel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Level {
     /// Low throughout.
     Low,
@@ -72,6 +74,7 @@ impl Level {
 
 /// A decoded event, kept for range queries.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct StoredEvent {
     /// First sample.
     pub start: u64,
@@ -85,6 +88,30 @@ pub struct StoredEvent {
     pub text: String,
     /// The bytes the event is about, when the decoder provides them.
     pub data: Option<Arc<[u8]>>,
+}
+
+impl StoredEvent {
+    /// A decoder's annotation as described by `source` (the decoder's
+    /// name) on `channel`, with its payload if it has one.
+    pub fn from_annotation(a: &crate::decode::Annotation, source: Arc<str>, channel: u8) -> StoredEvent {
+        let mut e = StoredEvent::new(a.start, a.end, source, channel, a.event.to_string());
+        if let crate::decode::Event::Protocol { data, .. } = &a.event {
+            e.data = data.clone();
+        }
+        e
+    }
+
+    /// An event without payload (set [`StoredEvent::data`] to add one).
+    pub fn new(start: u64, end: u64, source: Arc<str>, channel: u8, text: String) -> StoredEvent {
+        StoredEvent {
+            start,
+            end,
+            source,
+            channel,
+            text,
+            data: None,
+        }
+    }
 }
 
 struct Tiles {

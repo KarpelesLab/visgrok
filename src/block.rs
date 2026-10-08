@@ -25,6 +25,7 @@ pub fn unit_size_for(channels: usize) -> usize {
 
 /// A run of consecutive samples.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Block {
     /// Index of the first sample of this block since the start of capture.
     pub start: u64,

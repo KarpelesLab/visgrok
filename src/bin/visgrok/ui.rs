@@ -260,7 +260,7 @@ fn event_loop(term: &mut DefaultTerminal, pipe: &Pipeline, auto: bool) -> io::Re
                     o.spi_protocol = match o.spi_protocol {
                         SpiProtocol::Raw => SpiProtocol::Ssd1306 { width: 128, height: 64 },
                         SpiProtocol::Ssd1306 { height: 64, .. } => SpiProtocol::Ssd1306 { width: 128, height: 32 },
-                        SpiProtocol::Ssd1306 { .. } => SpiProtocol::Raw,
+                        _ => SpiProtocol::Raw,
                     };
                     o.spi_protocol
                 };
@@ -737,10 +737,8 @@ mod tests {
         roles[26] = Some(Role::SpiMosi);
         roles[27] = Some(Role::SpiDc);
         roles[28] = Some(Role::SpiCs);
-        let opts = DecoderOptions {
-            spi_protocol: SpiProtocol::Ssd1306 { width: 128, height: 64 },
-            ..Default::default()
-        };
+        let mut opts = DecoderOptions::default();
+        opts.spi_protocol = SpiProtocol::Ssd1306 { width: 128, height: 64 };
         let pipe = Pipeline::start(
             Box::new(High(Synth::device(50_000_000, Some(15_000_000)))),
             None,
@@ -797,10 +795,8 @@ mod tests {
             Some(Role::SpiDc),
             Some(Role::SpiCs),
         ];
-        let opts = DecoderOptions {
-            spi_protocol: SpiProtocol::Ssd1306 { width: 128, height: 64 },
-            ..Default::default()
-        };
+        let mut opts = DecoderOptions::default();
+        opts.spi_protocol = SpiProtocol::Ssd1306 { width: 128, height: 64 };
         let pipe = Pipeline::start(
             Box::new(Synth::device(50_000_000, Some(15_000_000))),
             None,

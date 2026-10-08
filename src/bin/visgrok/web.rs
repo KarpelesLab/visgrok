@@ -27,7 +27,7 @@ use visgrok::store::{SampleStore, StoredEvent};
 use visgrok::synth::Synth;
 use visgrok::vgk::VgkReader;
 
-use crate::pipeline::{Pipeline, Setup, format_event};
+use crate::pipeline::{Pipeline, Setup};
 
 const PAGE: &str = include_str!("web/index.html");
 
@@ -93,21 +93,19 @@ impl Session {
     fn sidecar(&self) -> Sidecar {
         let cap = self.capture.lock().unwrap().clone();
         let rec = self.recording.lock().unwrap().clone();
-        Sidecar {
-            capture: cap
-                .as_ref()
-                .and_then(|p| p.file_name())
-                .map(|f| f.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-            names: self.names.lock().unwrap().clone(),
-            roles: self.roles.lock().unwrap().clone(),
-            options: self.options.lock().unwrap().clone(),
-            device: rec.0,
-            samplerate: rec.1,
-            threshold: rec.2,
-            bookmarks: self.bookmarks.lock().unwrap().clone(),
-            notes: self.notes.lock().unwrap().clone(),
-        }
+        let mut sc = Sidecar::default();
+        sc.capture = cap
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|f| f.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        sc.names = self.names.lock().unwrap().clone();
+        sc.roles = self.roles.lock().unwrap().clone();
+        sc.options = self.options.lock().unwrap().clone();
+        (sc.device, sc.samplerate, sc.threshold) = rec;
+        sc.bookmarks = self.bookmarks.lock().unwrap().clone();
+        sc.notes = self.notes.lock().unwrap().clone();
+        sc
     }
 
     /// Writes the sidecar next to the current capture.
@@ -373,17 +371,7 @@ impl Session {
                         .filter(|t| !matches!(t.annotation.event, visgrok::decode::Event::Frame(_)))
                         .map(|t| {
                             let (source, channel) = names.get(t.decoder).cloned().unwrap_or((Arc::from("?"), 0));
-                            StoredEvent {
-                                start: t.annotation.start,
-                                end: t.annotation.end,
-                                source,
-                                channel,
-                                text: format_event(&t.annotation.event),
-                                data: match &t.annotation.event {
-                                    visgrok::decode::Event::Protocol { data, .. } => data.clone(),
-                                    _ => None,
-                                },
-                            }
+                            StoredEvent::from_annotation(&t.annotation, source, channel)
                         }),
                 );
                 progress.store(b.end(), Ordering::SeqCst);
@@ -446,7 +434,7 @@ impl Session {
             a.process(&b);
             for t in a.annotations.drain(..) {
                 match t.annotation.event {
-                    visgrok::decode::Event::UartFormat { format } => even = format.starts_with("8E"),
+                    visgrok::decode::Event::UartFormat { format, .. } => even = format.starts_with("8E"),
                     visgrok::decode::Event::UartByte { value, .. } if first.is_none() => first = Some(value),
                     _ => {}
                 }
@@ -534,14 +522,7 @@ impl Session {
         };
         o.str("uartFormat", &uart_fmt);
         o.str("uartProto", uart_proto);
-        o.str(
-            "spiProto",
-            match spi {
-                SpiProtocol::Raw => "raw",
-                SpiProtocol::Ssd1306 { height: 32, .. } => "ssd1306:128x32",
-                SpiProtocol::Ssd1306 { .. } => "ssd1306",
-            },
-        );
+        o.str("spiProto", &spi.id());
         let marks: Vec<String> = self
             .bookmarks
             .lock()
@@ -767,7 +748,7 @@ impl Session {
                     let mut b = self.bookmarks.lock().unwrap();
                     b.retain(|m| m.sample != sample);
                     if msg.get("remove").and_then(Json::bool) != Some(true) {
-                        b.push(Bookmark { sample, label });
+                        b.push(Bookmark::new(sample, label));
                     }
                     b.sort_by_key(|m| m.sample);
                 }
@@ -866,15 +847,10 @@ fn inspect_json(store: &SampleStore, e: &StoredEvent) -> String {
     let format = store
         .last_event(e.start + 1, &e.source, 100_000, |t| t.starts_with("── frame format "))
         .and_then(|f| f.text.trim_start_matches("── frame format ").split(' ').next().map(str::to_string));
-    let req = Request {
-        source: &e.source,
-        start: e.start,
-        end: e.end,
-        text: &e.text,
-        data: e.data.as_deref(),
-        bit_time: baud.filter(|&b| b > 0.0).map(|b| samplerate / b),
-        format: format.as_deref(),
-    };
+    let mut req = Request::new(&e.source, e.start, e.end, &e.text);
+    req.data = e.data.as_deref();
+    req.bit_time = baud.filter(|&b| b > 0.0).map(|b| samplerate / b);
+    req.format = format.as_deref();
     let (ws, we) = inspect::window(&req);
     let Ok(sig) = store.signal(ws, we, inspect::mask(&e.source)) else {
         return "null".into();
@@ -896,19 +872,20 @@ fn inspect_json(store: &SampleStore, e: &StoredEvent) -> String {
         .collect();
     let fields_json: Vec<String> = fields
         .iter()
-        .map(|f| {
+        .filter_map(|f| {
             let place = match f.place {
                 Place::Line(ch) => ch.to_string(),
                 Place::Row(r) => jstr(r),
+                _ => return None, // not shown by this page
             };
-            format!(
+            Some(format!(
                 "[{},{},{place},{},{},{}]",
                 f.start,
                 f.end,
                 jstr(&f.label),
                 jstr(&f.detail),
                 f.bad as u8
-            )
+            ))
         })
         .collect();
     format!(

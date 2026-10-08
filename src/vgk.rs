@@ -57,6 +57,7 @@ pub mod kind {
 
 /// Payload codecs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Codec {
     /// Uncompressed.
     Store = 0,
@@ -66,6 +67,7 @@ pub enum Codec {
 
 /// Capture metadata.
 #[derive(Clone, Debug, Default, PartialEq)]
+#[non_exhaustive]
 pub struct Meta {
     /// Device description.
     pub device: String,
@@ -300,12 +302,12 @@ impl<W: Write + Send + 'static> VgkWriter<W> {
     /// Registers a callback told about every sample chunk once it is on
     /// disk (the output is flushed first), so readers can follow a capture
     /// while it is being written.
-    pub fn set_on_chunk(&mut self, f: impl FnMut(ChunkRef) + Send + 'static) {
+    pub(crate) fn set_on_chunk(&mut self, f: impl FnMut(ChunkRef) + Send + 'static) {
         self.on_chunk = Some(Box::new(f));
     }
 
     /// Sets the overview tiles written by [`VgkWriter::finish`].
-    pub fn set_overview(&mut self, tile: u64, tiles: &[crate::store::Tile]) {
+    pub(crate) fn set_overview(&mut self, tile: u64, tiles: &[crate::store::Tile]) {
         let mut p = Vec::with_capacity(16 + tiles.len() * 8);
         p.extend_from_slice(&tile.to_le_bytes());
         p.extend_from_slice(&(tiles.len() as u64).to_le_bytes());
@@ -381,7 +383,7 @@ impl<W: Write + Send + 'static> VgkWriter<W> {
 
 /// Location of a sample chunk in a `.vgk` file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ChunkRef {
+pub(crate) struct ChunkRef {
     /// File offset of the chunk header.
     pub offset: u64,
     /// Index of the chunk's first sample.
@@ -420,7 +422,7 @@ fn read_header(f: &mut impl Read) -> io::Result<Option<[u8; CHUNK_HEADER]>> {
 }
 
 /// Reads and decodes the sample chunk at `offset` (random access).
-pub fn read_chunk_at(f: &mut File, offset: u64) -> io::Result<Vec<u8>> {
+pub(crate) fn read_chunk_at(f: &mut File, offset: u64) -> io::Result<Vec<u8>> {
     f.seek(SeekFrom::Start(offset))?;
     let h = read_header(f)?.ok_or_else(|| invalid(format!("no chunk at offset {offset}")))?;
     let stored = u32::from_le_bytes(h[20..24].try_into().unwrap()) as usize;
@@ -432,7 +434,7 @@ pub fn read_chunk_at(f: &mut File, offset: u64) -> io::Result<Vec<u8>> {
 /// Structure of a `.vgk` file, found by walking chunk headers (payloads
 /// are skipped, except the overview's).
 #[derive(Clone, Debug)]
-pub struct Scan {
+pub(crate) struct Scan {
     /// Capture metadata.
     pub meta: Meta,
     /// Sample chunks in order.
@@ -441,19 +443,16 @@ pub struct Scan {
     pub overview: Option<(u64, Vec<crate::store::Tile>)>,
     /// Total samples in the readable chunks.
     pub samples: u64,
-    /// The file ended with an index (the capture was closed properly).
-    pub complete: bool,
 }
 
 /// Scans a `.vgk` file's chunk headers.
-pub fn scan(path: impl AsRef<Path>) -> io::Result<Scan> {
+pub(crate) fn scan(path: impl AsRef<Path>) -> io::Result<Scan> {
     let mut f = BufReader::with_capacity(1 << 16, File::open(path)?);
     let meta = VgkReader::new(&mut f)?.meta().clone();
     let unit = meta.unit_size as u64;
     let mut pos = f.stream_position()?;
     let mut chunks = Vec::new();
     let mut overview = None;
-    let mut complete = false;
     let mut samples = 0;
     while let Some(h) = read_header(&mut f)? {
         let first = u64::from_le_bytes(h[8..16].try_into().unwrap());
@@ -493,10 +492,7 @@ pub fn scan(path: impl AsRef<Path>) -> io::Result<Scan> {
                     overview = Some((tile, tiles));
                 }
             }
-            kind::INDEX => {
-                complete = true;
-                break;
-            }
+            kind::INDEX => break,
             _ => f.seek_relative(stored as i64)?,
         }
         pos = end;
@@ -506,7 +502,6 @@ pub fn scan(path: impl AsRef<Path>) -> io::Result<Scan> {
         chunks,
         overview,
         samples,
-        complete,
     })
 }
 

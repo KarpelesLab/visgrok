@@ -6,6 +6,7 @@ use crate::block::Block;
 
 /// Static description of a capture stream.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct CaptureInfo {
     /// Human-readable device name.
     pub device: String,
@@ -20,6 +21,18 @@ pub struct CaptureInfo {
 }
 
 impl CaptureInfo {
+    /// Information for `channels` channels at `samplerate`, with the
+    /// smallest sample unit that fits and default channel names.
+    pub fn new(device: impl Into<String>, channels: usize, samplerate: u64) -> CaptureInfo {
+        CaptureInfo {
+            device: device.into(),
+            channels,
+            samplerate,
+            unit_size: crate::block::unit_size_for(channels),
+            names: Vec::new(),
+        }
+    }
+
     /// Name of channel `i`.
     pub fn name(&self, i: usize) -> String {
         self.names

@@ -130,7 +130,7 @@ fn read_entry(f: &mut File, e: &ZipEntry) -> io::Result<Vec<u8>> {
 }
 
 /// Parses sigrok's size strings: `"50 MHz"`, `"1500 kHz"`, `"24000000"`.
-pub fn parse_samplerate(s: &str) -> Option<u64> {
+pub(crate) fn parse_samplerate(s: &str) -> Option<u64> {
     let s = s.trim().trim_end_matches(['H', 'h', 'z', 'Z']).trim();
     let (num, mul) = match s.chars().last()? {
         'k' | 'K' => (&s[..s.len() - 1], 1e3),

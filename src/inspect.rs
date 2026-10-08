@@ -15,6 +15,7 @@ use crate::decode::uart::estimate_bit_time;
 
 /// Levels of some channels over a sample range, as a list of changes.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Signal {
     /// First sample covered.
     pub start: u64,
@@ -101,6 +102,7 @@ impl Signal {
 
 /// Where a [`Field`] is shown.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Place {
     /// On a channel: the value of one bit sampled there.
     Line(u8),
@@ -110,6 +112,7 @@ pub enum Place {
 
 /// A bit or a group of bits and what it means.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Field {
     /// First sample.
     pub start: u64,
@@ -127,6 +130,7 @@ pub struct Field {
 
 /// The event to break down.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Request<'a> {
     /// Name of the decoder that produced the event.
     pub source: &'a str,
@@ -142,6 +146,22 @@ pub struct Request<'a> {
     pub bit_time: Option<f64>,
     /// UART frame format (e.g. `"8E2"`) from the decoder's last report.
     pub format: Option<&'a str>,
+}
+
+impl<'a> Request<'a> {
+    /// The event `text` of decoder `source` spanning `start..end`, without
+    /// payload or UART timing hints (set those fields when known).
+    pub fn new(source: &'a str, start: u64, end: u64, text: &'a str) -> Request<'a> {
+        Request {
+            source,
+            start,
+            end,
+            text,
+            data: None,
+            bit_time: None,
+            format: None,
+        }
+    }
 }
 
 enum Bus {

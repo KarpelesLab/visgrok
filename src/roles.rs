@@ -1,8 +1,10 @@
 //! Channel roles: manual assignment and automatic detection.
 //!
 //! Detection is heuristic. It looks at per-channel timing statistics
-//! ([`Stats`]) and at cross-channel relationships ([`Correlator`]) and proposes
-//! a role with a confidence. The user can accept or override any suggestion.
+//! ([`Stats`]) and at cross-channel relationships (which lines change
+//! together, which one moves on another's edges) and proposes a role with a
+//! confidence, through [`Analyzer::suggest`](crate::analyzer::Analyzer::suggest).
+//! The user can accept or override any suggestion.
 
 use std::fmt;
 
@@ -11,6 +13,7 @@ use crate::stats::{ChannelStats, Stats};
 
 /// What a channel carries.
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum Role {
     /// Not analyzed.
     Unknown,
@@ -99,6 +102,7 @@ pub fn fmt_hz(hz: f64) -> String {
 
 /// A detected role with a confidence in `0.0..=1.0`.
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct Suggestion {
     /// Proposed role.
     pub role: Role,
@@ -114,7 +118,7 @@ pub const BAUD_RATES: &[u32] = &[
 
 /// Cross-channel event counters used to detect buses.
 #[derive(Clone, Debug)]
-pub struct Correlator {
+pub(crate) struct Correlator {
     n: usize,
     state: u32,
     /// `hi[i][j]`: changes of j while i is high and steady.
@@ -143,13 +147,8 @@ pub struct Correlator {
 }
 
 impl Correlator {
-    /// Creates counters for `n` channels.
-    pub fn new(n: usize) -> Correlator {
-        Correlator::with_glitch(n, 0)
-    }
-
-    /// Like [`Correlator::new`], ignoring edge intervals of up to `glitch`
-    /// samples when measuring each channel's shortest period.
+    /// Creates counters for `n` channels, ignoring edge intervals of up to
+    /// `glitch` samples when measuring each channel's shortest period.
     pub fn with_glitch(n: usize, glitch: u64) -> Correlator {
         let z = vec![0; n * n];
         Correlator {
@@ -251,7 +250,7 @@ impl Correlator {
 }
 
 /// Snaps a measured baud rate to the nearest standard rate within 4%.
-pub fn snap_baud(measured: f64) -> Option<u32> {
+pub(crate) fn snap_baud(measured: f64) -> Option<u32> {
     BAUD_RATES
         .iter()
         .copied()
@@ -325,7 +324,7 @@ fn uart_score(c: &ChannelStats, samplerate: u64) -> Option<Suggestion> {
 }
 
 /// Proposes a role for each channel.
-pub fn detect(stats: &Stats, corr: &Correlator, samplerate: u64) -> Vec<Suggestion> {
+pub(crate) fn detect(stats: &Stats, corr: &Correlator, samplerate: u64) -> Vec<Suggestion> {
     let n = stats.channels.len();
     let mut out: Vec<Suggestion> = vec![
         Suggestion {

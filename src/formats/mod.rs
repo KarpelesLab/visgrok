@@ -21,6 +21,7 @@ use crate::vgk::{Meta, VgkReader, VgkWriter};
 
 /// A capture file format.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Format {
     /// visgrok `.vgk`.
     Vgk,
@@ -69,6 +70,7 @@ fn unknown(path: &Path) -> io::Error {
 
 /// Options for reading captures.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct ReadOptions {
     /// Sample rate, required for `.bin`, optional override for `.vcd`.
     pub samplerate: Option<u64>,
@@ -98,6 +100,7 @@ pub fn open(path: &Path, opts: &ReadOptions) -> io::Result<Box<dyn Source>> {
 
 /// Options for writing captures.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct WriteOptions {
     /// Chunk compression for `.sr` output.
     pub sr_compression: SrCompression,
@@ -284,6 +287,7 @@ pub fn create(path: &Path, info: &CaptureInfo, opts: &WriteOptions) -> io::Resul
 
 /// Result of a conversion.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Converted {
     /// Description of the input.
     pub info: CaptureInfo,

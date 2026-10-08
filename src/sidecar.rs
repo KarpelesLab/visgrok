@@ -41,6 +41,7 @@ pub const VERSION: u32 = 1;
 
 /// A bookmark in a capture.
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct Bookmark {
     /// Sample index.
     pub sample: u64,
@@ -48,8 +49,19 @@ pub struct Bookmark {
     pub label: String,
 }
 
+impl Bookmark {
+    /// A bookmark at `sample`.
+    pub fn new(sample: u64, label: impl Into<String>) -> Bookmark {
+        Bookmark {
+            sample,
+            label: label.into(),
+        }
+    }
+}
+
 /// Contents of a sidecar file.
 #[derive(Clone, Debug, Default, PartialEq)]
+#[non_exhaustive]
 pub struct Sidecar {
     /// Capture file name this describes.
     pub capture: String,
