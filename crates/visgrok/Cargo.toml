@@ -1,0 +1,11 @@
+[package]
+name = "visgrok"
+description = "From-scratch driver and real-time analysis for Sipeed SLogic logic analyzers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rawusb.workspace = true

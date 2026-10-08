@@ -1,0 +1,15 @@
+[package]
+name = "visgrok-tui"
+description = "Terminal UI for live capture and analysis with SLogic logic analyzers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "visgrok"
+path = "src/main.rs"
+
+[dependencies]
+visgrok.workspace = true
