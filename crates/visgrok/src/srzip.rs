@@ -220,11 +220,11 @@ impl<W: Write> SrZipWriter<W> {
 
 /// Formats a sample rate the way sigrok does (`"24 MHz"`, `"1500 kHz"`).
 pub fn samplerate_string(hz: u64) -> String {
-    if hz >= 1_000_000_000 && hz % 1_000_000_000 == 0 {
+    if hz >= 1_000_000_000 && hz.is_multiple_of(1_000_000_000) {
         format!("{} GHz", hz / 1_000_000_000)
-    } else if hz >= 1_000_000 && hz % 1_000_000 == 0 {
+    } else if hz >= 1_000_000 && hz.is_multiple_of(1_000_000) {
         format!("{} MHz", hz / 1_000_000)
-    } else if hz >= 1_000 && hz % 1_000 == 0 {
+    } else if hz >= 1_000 && hz.is_multiple_of(1_000) {
         format!("{} kHz", hz / 1_000)
     } else {
         format!("{hz} Hz")

@@ -162,7 +162,7 @@ mod tests {
     fn detects_16bit() {
         let mut d = EdgeDetector::new(0xffff);
         let mut out = Vec::new();
-        let mut s = vec![0x8000u16; 21];
+        let mut s = [0x8000u16; 21];
         s[13] = 0x8001;
         let data: Vec<u8> = s.iter().flat_map(|v| v.to_le_bytes()).collect();
         d.process(&Block::new(100, 2, data), &mut out);

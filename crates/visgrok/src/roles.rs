@@ -98,13 +98,13 @@ pub struct Correlator {
     n: usize,
     state: u16,
     /// `hi[i][j]`: changes of j while i is high and steady.
-    hi: Vec<u64>,
+    pub(crate) hi: Vec<u64>,
     /// `lo[i][j]`: changes of j while i is low and steady.
-    lo: Vec<u64>,
+    pub(crate) lo: Vec<u64>,
     /// `start[i][j]`: j falls while i is high and steady (I2C START-like).
-    start: Vec<u64>,
+    pub(crate) start: Vec<u64>,
     /// `stop[i][j]`: j rises while i is high and steady (I2C STOP-like).
-    stop: Vec<u64>,
+    pub(crate) stop: Vec<u64>,
 }
 
 impl Correlator {
@@ -153,7 +153,7 @@ impl Correlator {
         }
     }
 
-    fn get(&self, v: &[u64], i: usize, j: usize) -> u64 {
+    pub(crate) fn get(&self, v: &[u64], i: usize, j: usize) -> u64 {
         v[i * self.n + j]
     }
 }
@@ -200,7 +200,7 @@ fn uart_score(c: &ChannelStats, samplerate: u64) -> Option<Suggestion> {
         if (1.0..=10.0).contains(&r) && (x as f64 / unit - r).abs() < 0.2 { (s + x as f64, b + r) } else { (s, b) }
     });
     let baud = snap_baud(samplerate as f64 * bits / sum)?;
-    (fit > 0.85).then(|| Suggestion { role: Role::Uart { baud }, confidence: fit * 0.9 })
+    (fit > 0.85).then_some(Suggestion { role: Role::Uart { baud }, confidence: fit * 0.9 })
 }
 
 /// Proposes a role for each channel.
@@ -241,13 +241,14 @@ pub fn detect(stats: &Stats, corr: &Correlator, samplerate: u64) -> Vec<Suggesti
             if starts < 2 || stops < 2 || lo < 8 {
                 continue;
             }
-            // SCL itself must change only while SDA is steady (open drain, no
-            // simultaneous edges in normal traffic) and data changes while SCL
-            // is high should be about START+STOP only.
-            let extra_hi = hi.saturating_sub(starts.min(stops) * 2);
-            let ratio = lo as f64 / (lo + extra_hi) as f64;
-            let duty_ok = stats.channels[scl].duty().unwrap_or(0.0) > 0.4;
-            if ratio > 0.9 && duty_ok {
+            // SDA changes while SCL is high are START/STOP conditions only:
+            // a couple per transfer, against several data changes (while SCL
+            // is low) per byte. Unrelated signals show no such asymmetry.
+            let hi_frac = hi as f64 / (lo + hi) as f64;
+            let balanced = starts.abs_diff(stops) <= starts.max(stops) / 4 + 1;
+            let ratio = 1.0 - hi_frac;
+            let duty_ok = stats.channels[scl].duty().unwrap_or(0.0) > 0.3;
+            if hi_frac < 0.35 && balanced && duty_ok {
                 best_i2c.push((ratio, scl, sda));
             }
         }

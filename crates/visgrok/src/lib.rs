@@ -1,5 +1,6 @@
 //! visgrok: driver, streaming and real-time analysis for Sipeed SLogic logic analyzers.
 //!
+//! - [`analyzer`]: the real-time analysis pipeline.
 //! - [`block`]: canonical sample representation.
 //! - [`edges`]: transition extraction.
 //! - [`stats`]: per-channel timing statistics.
@@ -7,6 +8,7 @@
 //! - [`decode`]: streaming protocol decoders (UART, I2C, SPI).
 //! - [`srzip`]: streaming sigrok `.sr` session writer.
 
+pub mod analyzer;
 pub mod block;
 pub mod decode;
 pub mod edges;

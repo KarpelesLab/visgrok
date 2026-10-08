@@ -94,8 +94,8 @@ impl Uart {
             let p = level_at(self.mid(start, 1 + self.cfg.data_bits as u32)) as u32;
             let total = ones + p;
             parity_error = match self.cfg.parity {
-                Parity::Even => total % 2 != 0,
-                _ => total % 2 == 0,
+                Parity::Even => !total.is_multiple_of(2),
+                _ => total.is_multiple_of(2),
             };
         }
         let stop = level_at(stop_mid);
