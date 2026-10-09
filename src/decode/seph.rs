@@ -202,8 +202,8 @@ pub struct Seph {
     /// APDUs in progress, keyed by transport and direction (true = to the
     /// device).
     apdus: Vec<((Transport, bool), Reassembly)>,
-    /// Last command (CLA, INS) per transport, to decode its response.
-    last_cmd: Vec<(Transport, (u8, u8))>,
+    /// Last command per transport, to decode its response.
+    last_cmd: Vec<(Transport, Vec<u8>)>,
     /// Packets decoded.
     packets: u64,
 }
@@ -584,12 +584,15 @@ impl Seph {
 impl Seph {
     /// An APDU annotation: a command to the device or its response.
     fn apdu(&mut self, t: Transport, to_device: bool, b: &[u8], start: u64, end: u64) -> Annotation {
-        let cmd = self.last_cmd.iter().find(|c| c.0 == t).map(|c| c.1);
-        if to_device && b.len() >= 2 {
+        if to_device {
             self.last_cmd.retain(|c| c.0 != t);
-            self.last_cmd.push((t, (b[0], b[1])));
+            if b.len() >= 4 {
+                self.last_cmd.push((t, b.to_vec()));
+            }
+            return apdu(t, true, b, None, start, end);
         }
-        apdu(t, to_device, b, cmd, start, end)
+        let cmd = self.last_cmd.iter().find(|c| c.0 == t).map(|c| c.1.as_slice());
+        apdu(t, false, b, cmd, start, end)
     }
 }
 
@@ -646,9 +649,81 @@ fn pascal_strings(mut b: &[u8]) -> (Vec<Vec<u8>>, &[u8]) {
     (v, b)
 }
 
+/// A certificate of the dashboard's authentication (`ledgerctl`): length-
+/// prefixed header (device certificate only), public key and signature.
+fn certificate(fields: &[Vec<u8>]) -> String {
+    let key = |k: &[u8]| {
+        if k.len() == 65 && k[0] == 4 {
+            format!("public key {}", hex_trunc(k, 65).replace(' ', ""))
+        } else {
+            format!("{}-byte key {}", k.len(), hex_trunc(k, 65).replace(' ', ""))
+        }
+    };
+    let sig = |g: &[u8]| {
+        let der = g.first() == Some(&0x30) && g.get(1).is_some_and(|&n| n as usize + 2 == g.len());
+        format!("signature {} bytes{}", g.len(), if der { " (DER ECDSA)" } else { "" })
+    };
+    match fields {
+        [h, k, g] => {
+            let header = if h.is_empty() {
+                "no header".to_string()
+            } else {
+                format!("header {}", hex_trunc(h, 32).replace(' ', ""))
+            };
+            format!("{header}, {}, {}", key(k), sig(g))
+        }
+        [k, g] => format!("{}, {}", key(k), sig(g)),
+        _ => fields.iter().map(|f| hex_trunc(f, 16)).collect::<Vec<_>>().join(" | "),
+    }
+}
+
+/// What a command's data says, for known commands.
+fn command_meaning(c: &[u8]) -> Option<String> {
+    let data = c.get(5..).unwrap_or(&[]);
+    match (c[0], c[1]) {
+        (0xe0, 0x04) if data.len() == 4 => {
+            let id = be32(data, 0)?;
+            Some(format!(
+                "target {id:#010x}{}",
+                target_name(id).map(|n| format!(" ({n})")).unwrap_or_default()
+            ))
+        }
+        (0xe0, 0x50) if data.len() == 8 => Some(format!("server nonce {}", hex_trunc(data, 8).replace(' ', ""))),
+        // The server's certificate chain, the last one (P1 0x80) being its
+        // ephemeral key, signed over 0x11 ‖ server nonce ‖ device nonce ‖ key.
+        (0xe0, 0x51) => {
+            let (f, _) = pascal_strings(data);
+            let what = if c[2] & 0x80 != 0 {
+                "server ephemeral key (last certificate)"
+            } else {
+                "server certificate"
+            };
+            Some(format!("{what}: {}", certificate(&f)))
+        }
+        _ => None,
+    }
+}
+
 /// What a response's data says, for known commands.
-fn response_meaning(cmd: (u8, u8), d: &[u8]) -> Option<String> {
-    match cmd {
+fn response_meaning(c: &[u8], d: &[u8]) -> Option<String> {
+    match (c[0], c[1]) {
+        (0xe0, 0x50) if d.len() >= 12 => Some(format!(
+            "{}, device nonce {}",
+            hex_trunc(&d[..4], 4).replace(' ', ""),
+            hex_trunc(&d[4..12], 8).replace(' ', "")
+        )),
+        // The device's chain: its certificate (signed by Ledger over 0x02 ‖
+        // header ‖ key), then its ephemeral key (signed by the device key
+        // over 0x12 ‖ device nonce ‖ server nonce ‖ key).
+        (0xe0, 0x52) => {
+            let (f, _) = pascal_strings(d);
+            let what = if c[2] & 0x80 != 0 {
+                "device ephemeral key"
+            } else {
+                "device certificate"
+            };
+            Some(format!("{what}: {}", certificate(&f)))
+        }
         (0xb0, 0x01) if d.first() == Some(&1) => {
             let (v, _) = pascal_strings(&d[1..]);
             let name = v.first().map(|x| text(x))?;
@@ -698,7 +773,7 @@ fn response_meaning(cmd: (u8, u8), d: &[u8]) -> Option<String> {
 
 /// An APDU annotation: a command to the device or its response (`cmd`:
 /// the last command on that transport).
-fn apdu(t: Transport, to_device: bool, b: &[u8], cmd: Option<(u8, u8)>, start: u64, end: u64) -> Annotation {
+fn apdu(t: Transport, to_device: bool, b: &[u8], cmd: Option<&[u8]>, start: u64, end: u64) -> Annotation {
     let text = if to_device {
         match b {
             [cla, ins, p1, p2, rest @ ..] => {
@@ -716,6 +791,9 @@ fn apdu(t: Transport, to_device: bool, b: &[u8], cmd: Option<(u8, u8)>, start: u
                         }
                     }
                 }
+                if let Some(m) = command_meaning(b) {
+                    s += &format!(" — {m}");
+                }
                 s
             }
             _ => format!("C-APDU ({}): short, {}", t.label(), hex_trunc(b, 16)),
@@ -725,11 +803,16 @@ fn apdu(t: Transport, to_device: bool, b: &[u8], cmd: Option<(u8, u8)>, start: u
         let meaning = status_word(sw).map(|m| format!(" ({m})")).unwrap_or_default();
         let data = &b[..b.len() - 2];
         let to = cmd
-            .and_then(|(c, i)| instruction(c, i))
+            .and_then(|c| instruction(c[0], c[1]))
             .map(|n| format!(" to {n}"))
             .unwrap_or_default();
         if data.is_empty() {
-            format!("R-APDU ({}){to}: SW {sw:04x}{meaning}", t.label())
+            let done = if sw == 0x9000 && cmd.is_some_and(|c| c[..2] == [0xe0, 0x53]) {
+                " — secure channel established"
+            } else {
+                ""
+            };
+            format!("R-APDU ({}){to}: SW {sw:04x}{meaning}{done}", t.label())
         } else {
             let txt = match cmd.and_then(|c| response_meaning(c, data)) {
                 Some(m) => format!(" — {m}"),
@@ -1066,6 +1149,254 @@ fn bagl(p: &[u8]) -> String {
     s
 }
 
+/// The text between `"` after `label`, e.g. `"2.39.0"` in
+/// `SEPROXYHAL version "2.39.0"`.
+fn quoted_after<'a>(text: &'a str, label: &str) -> Option<&'a str> {
+    let rest = &text[text.find(label)? + label.len()..];
+    let rest = rest.trim_start().strip_prefix('"')?;
+    Some(&rest[..rest.find('"')?])
+}
+
+/// What an ATR's historical bytes say on a Ledger SE: its version and
+/// target id, as length-prefixed fields.
+fn atr_identity(text: &str) -> Option<String> {
+    let hex = text.split("historical bytes ").nth(1)?.split(" '").next()?;
+    let b: Vec<u8> = hex.split(' ').map(|h| u8::from_str_radix(h, 16).ok()).collect::<Option<_>>()?;
+    let (f, _) = pascal_strings(&b);
+    let ver = f.first().filter(|v| printable(v))?;
+    let mut s = format!("SE {}", self::text(ver));
+    if let Some(id) = f.get(1).filter(|i| i.len() == 4) {
+        let id = u32::from_be_bytes([id[0], id[1], id[2], id[3]]);
+        s += &format!(
+            ", target {id:#010x}{}",
+            target_name(id).map(|n| format!(" ({n})")).unwrap_or_default()
+        );
+    }
+    Some(s)
+}
+
+/// A timeline entry: what happened from `start` (to `end` for a run of
+/// events), in samples.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct Milestone {
+    /// First sample.
+    pub start: u64,
+    /// Start of the last event of a run.
+    pub end: Option<u64>,
+    /// Description.
+    pub text: String,
+}
+
+/// A run of similar events summarized in one timeline entry.
+struct Run {
+    start: u64,
+    end: u64,
+    count: usize,
+    bytes: usize,
+    first: u32,
+    last: u32,
+}
+
+/// Milestones of a SEPROXYHAL capture, from the decoder's events
+/// (`(start sample, text, data)`, in order): SE boots and link rate, MCU
+/// sessions and versions, SE commands to the MCU, power, USB and BLE state,
+/// battery, lock state, app and versions reported to the host, the
+/// authentication, secure channel transfers, progress reports, line
+/// problems.
+pub fn timeline<'a>(events: impl IntoIterator<Item = (u64, &'a str, Option<&'a [u8]>)>) -> Vec<Milestone> {
+    let mut out: Vec<Milestone> = Vec::new();
+    let mut boots = 0;
+    let mut usb: Option<bool> = None;
+    let mut ble_adv: Option<bool> = None;
+    let mut locked = false;
+    let mut app = String::new();
+    let mut versions = String::new();
+    let mut power = String::new();
+    let mut secure: Option<Run> = None;
+    let mut progress: Option<Run> = None;
+    let flush_secure = |r: &mut Option<Run>, out: &mut Vec<Milestone>| {
+        if let Some(r) = r.take() {
+            out.push(Milestone {
+                start: r.start,
+                end: Some(r.end),
+                text: format!("{} secure channel commands, {} bytes of data", r.count, r.bytes),
+            });
+        }
+    };
+    let flush_progress = |r: &mut Option<Run>, out: &mut Vec<Milestone>| {
+        if let Some(r) = r.take() {
+            out.push(Milestone {
+                start: r.start,
+                end: Some(r.end),
+                text: format!("progress reports from the MCU, {} → {} ({} events)", r.first, r.last, r.count),
+            });
+        }
+    };
+    for (at, text, data) in events {
+        let mut push = |text: String| {
+            out.push(Milestone {
+                start: at,
+                end: None,
+                text,
+            })
+        };
+        if text.starts_with("ATR") {
+            flush_secure(&mut secure, &mut out);
+            flush_progress(&mut progress, &mut out);
+            boots += 1;
+            locked = false;
+            let id = atr_identity(text).map(|s| format!(": {s}")).unwrap_or_default();
+            out.push(Milestone {
+                start: at,
+                end: None,
+                text: format!("SE boot {boots}{id}"),
+            });
+        } else if let Some(r) = text.strip_prefix("── new rate: ") {
+            push(format!("link speed: {}", r.trim_end_matches(" ──")));
+        } else if text.contains("SESSION_START_EVENT:") {
+            if let Some(v) = quoted_after(text, "bootloader version") {
+                if text.contains("SEPROXYHAL version") {
+                    let sv = quoted_after(text, "SEPROXYHAL version").unwrap_or("?");
+                    push(format!("MCU firmware session: SEPROXYHAL version {sv}, MCU bootloader {v}"));
+                } else {
+                    push(format!("MCU bootloader session: bootloader {v}"));
+                }
+            } else {
+                push("MCU session start".into());
+            }
+        } else if let Some(r) = text.strip_prefix("SE→MCU MCU: ") {
+            push(format!("SE asks the MCU: {r}"));
+        } else if text.starts_with("SE→MCU SE_POWER_OFF") {
+            flush_secure(&mut secure, &mut out);
+            out.push(Milestone {
+                start: at,
+                end: None,
+                text: "SE power off".into(),
+            });
+        } else if text.starts_with("SE→MCU DEVICE_OFF") {
+            push("device off".into());
+        } else if text.starts_with("SE→MCU USB_CONFIG: connect") || text.starts_with("SE→MCU USB_CONFIG: disconnect") {
+            let on = text.ends_with("connect") && !text.ends_with("disconnect");
+            if usb != Some(on) {
+                usb = Some(on);
+                push(format!("USB {}", if on { "connect" } else { "disconnect" }));
+            }
+        } else if text.contains("SETUP SET_CONFIGURATION") {
+            push(format!(
+                "USB enumerated by the host ({})",
+                text.rsplit("SETUP ").next().unwrap_or("")
+            ));
+        } else if text.contains("HCI command aci_gap_set_discoverable") || text.contains("HCI command aci_gap_set_non_discoverable") {
+            let on = text.contains("set_discoverable");
+            if ble_adv != Some(on) {
+                ble_adv = Some(on);
+                push(format!("BLE advertising {}", if on { "on" } else { "off" }));
+            }
+        } else if text.contains("HCI LE meta: connection complete") || text.contains("HCI LE meta: enhanced connection complete") {
+            push(format!("BLE connection: {}", text.split("complete ").nth(1).unwrap_or("")));
+        } else if text.contains("HCI disconnection complete") {
+            push("BLE disconnection".into());
+        } else if text.starts_with("MCU→SE STATUS_EVENT:") {
+            // Flags and battery, reported when the flags change.
+            let flags = text.split(" (").nth(1).and_then(|f| f.split(')').next()).unwrap_or("");
+            if flags != power {
+                power = flags.to_string();
+                // "battery 3817 mV 21%" (not the "battery issue" flag).
+                let battery = text
+                    .split(", battery ")
+                    .skip(1)
+                    .find(|b| b.starts_with(|c: char| c.is_ascii_digit()))
+                    .and_then(|b| b.split(',').next())
+                    .map(|b| format!("; battery {b}"))
+                    .unwrap_or_default();
+                push(format!("power: {flags}{battery}"));
+            }
+        } else if text.starts_with("MCU→SE ITC_EVENT: type 0xff, ") {
+            let v = data.and_then(|d| d.get(4)).copied().unwrap_or(0) as u32;
+            match progress.as_mut() {
+                Some(r) if v >= r.last => {
+                    r.last = v;
+                    r.end = at;
+                    r.count += 1;
+                }
+                _ => {
+                    flush_progress(&mut progress, &mut out);
+                    progress = Some(Run {
+                        start: at,
+                        end: at,
+                        count: 1,
+                        bytes: 0,
+                        first: v,
+                        last: v,
+                    });
+                }
+            }
+        } else if text.starts_with("C-APDU") {
+            let secu = data.is_some_and(|d| d.len() >= 2 && d[0] == 0xe0 && d[1] == 0x00);
+            if secu {
+                let n = data.map_or(0, |d| d.len().saturating_sub(5));
+                match secure.as_mut() {
+                    Some(r) => {
+                        r.count += 1;
+                        r.bytes += n;
+                        r.end = at;
+                    }
+                    None => {
+                        secure = Some(Run {
+                            start: at,
+                            end: at,
+                            count: 1,
+                            bytes: n,
+                            first: 0,
+                            last: 0,
+                        })
+                    }
+                }
+            } else {
+                flush_secure(&mut secure, &mut out);
+            }
+        } else if text.starts_with("R-APDU") {
+            if text.contains("SW 5515") {
+                if !locked {
+                    locked = true;
+                    push("host command refused: device locked".into());
+                }
+                continue;
+            }
+            if text.contains("SW 9000") {
+                if locked {
+                    locked = false;
+                    push("device unlocked (commands accepted again)".into());
+                }
+            } else if !text.contains("SECUINS") {
+                let sw = text.split("SW ").nth(1).unwrap_or("");
+                let to = text.split(" to ").nth(1).and_then(|t| t.split(':').next()).unwrap_or("command");
+                push(format!("host {to} failed: SW {sw}"));
+            }
+            if let Some(m) = text.split(" — ").nth(1) {
+                if m.starts_with("running ") && m != app {
+                    app = m.to_string();
+                    push(format!("host sees: {m}"));
+                } else if m.starts_with("target ") && m != versions {
+                    versions = m.to_string();
+                    push(format!("host reads versions: {m}"));
+                } else if m == "secure channel established" {
+                    push("host authenticated the device (genuine check); secure channel established".into());
+                }
+            }
+        } else if text == "BREAK" {
+            push("line held low (break)".into());
+        } else if text.contains("outside packets") || text.starts_with("incomplete") {
+            push(format!("line: {text}"));
+        }
+    }
+    flush_secure(&mut secure, &mut out);
+    flush_progress(&mut progress, &mut out);
+    out.sort_by_key(|e| e.start);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1186,14 +1517,85 @@ mod response_tests {
     #[test]
     fn versions() {
         let d = [0x01, 0x05, b'B', b'O', b'L', b'O', b'S', 0x05, b'2', b'.', b'6', b'.', b'0'];
-        assert_eq!(response_meaning((0xb0, 0x01), &d).unwrap(), "running \"BOLOS\" 2.6.0");
+        assert_eq!(response_meaning(&[0xb0, 0x01, 0, 0], &d).unwrap(), "running \"BOLOS\" 2.6.0");
         let d = [
             0x33, 0x00, 0x00, 0x04, 0x05, b'2', b'.', b'6', b'.', b'0', 0x04, 0xe6, 0x00, 0x00, 0x0b, 0x06, b'2', b'.', b'3', b'9', b'.',
             b'0', 0x06, b'1', b'.', b'2', b'5', b'.', b'0',
         ];
         assert_eq!(
-            response_meaning((0xe0, 0x01), &d).unwrap(),
+            response_meaning(&[0xe0, 0x01, 0, 0], &d).unwrap(),
             "target 0x33000004 (Nano X), SE 2.6.0, flags 0xb0000e6 (signed MCU, onboarded, HSM initialized, PIN validated), MCU 2.39.0, MCU bootloader 1.25.0"
+        );
+    }
+}
+
+#[cfg(test)]
+mod auth_tests {
+    use super::*;
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    /// The handshake as captured from a Nano X.
+    #[test]
+    fn authentication() {
+        let init = unhex("e05000000865fbf6224564be6d");
+        assert_eq!(command_meaning(&init).unwrap(), "server nonce 65fbf6224564be6d");
+        assert_eq!(
+            response_meaning(&init, &unhex("0000000104250e5baed9eee6")).unwrap(),
+            "00000001, device nonce 04250e5baed9eee6"
+        );
+        let cert = unhex(concat!(
+            "070d8398393c74bc41043cf2f66ec69a0a34e6f4b1bbabc7042ca9a023b17ff7f0a2fc769651c1da56649d3e0a55a720b1a755",
+            "0448fcb57a4d44c65ab7e42294be83c666ae85447ec23c463044022016909d3599f75346a56564c0f02f3bd708041ee7b6513b",
+            "eccbee4a6bd5eceaaa02207f0e01434b55146c51f1a976b0b84f1fdcf1464324cbcaadd25d9cf2dc413802"
+        ));
+        assert_eq!(
+            response_meaning(&unhex("e0520000"), &cert).unwrap(),
+            "device certificate: header 0d8398393c74bc, public key 043cf2f66ec69a0a34e6f4b1bbabc7042ca9a023b17ff7f0a2fc769651c1da56649d3e0a55a720b1a7550448fcb57a4d44c65ab7e42294be83c666ae85447ec23c, signature 70 bytes (DER ECDSA)"
+        );
+    }
+}
+
+#[cfg(test)]
+mod timeline_tests {
+    use super::*;
+
+    #[test]
+    fn milestones() {
+        let ev: Vec<(u64, &str, Option<&[u8]>)> = vec![
+            (
+                10,
+                "ATR (direct convention), TA1=87 Fi index 8 Di index 7 (reserved values); protocols T=0; 11 historical bytes 05 32 2e 36 2e 30 04 33 00 00 04 '.2.6.0.3...'",
+                None,
+            ),
+            (20, "R-APDU (USB ep2) to GET_APP_NAME_AND_VERSION: SW 5515 (device locked)", None),
+            (21, "R-APDU (USB ep2) to GET_APP_NAME_AND_VERSION: SW 5515 (device locked)", None),
+            (
+                30,
+                "C-APDU (USB ep2): CLA e0 INS 00 P1 00 P2 00 dashboard SECUINS (secure channel), Lc 3: 01 02 03",
+                Some(&[0xe0, 0, 0, 0, 3, 1, 2, 3]),
+            ),
+            (
+                31,
+                "C-APDU (USB ep2): CLA e0 INS 00 P1 00 P2 00 dashboard SECUINS (secure channel), Lc 1: 01",
+                Some(&[0xe0, 0, 0, 0, 1, 1]),
+            ),
+            (40, "SE→MCU SE_POWER_OFF", None),
+        ];
+        let t: Vec<(u64, Option<u64>, String)> = timeline(ev).into_iter().map(|m| (m.start, m.end, m.text)).collect();
+        assert_eq!(
+            t,
+            [
+                (10, None, "SE boot 1: SE 2.6.0, target 0x33000004 (Nano X)".to_string()),
+                (20, None, "host command refused: device locked".into()),
+                (30, Some(31), "2 secure channel commands, 4 bytes of data".into()),
+                (40, None, "SE power off".into()),
+            ]
         );
     }
 }

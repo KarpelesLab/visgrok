@@ -187,6 +187,24 @@ pub enum Query {
         #[arg(long)]
         json: bool,
     },
+    /// A readable log of the decoded messages (everything but single
+    /// characters and words), each with its complete bytes; for Ledger
+    /// SEPROXYHAL captures, preceded by a timeline of what happened.
+    Log {
+        #[command(flatten)]
+        cap: Cap,
+        #[command(flatten)]
+        range: Range,
+        /// Only decoders whose name contains this.
+        #[arg(short, long)]
+        decoder: Option<String>,
+        /// Write the log to this file instead of standard output.
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+        /// Only the timeline.
+        #[arg(long)]
+        timeline: bool,
+    },
     /// Channel levels at one moment.
     Levels {
         #[command(flatten)]
@@ -311,6 +329,22 @@ fn dispatch(q: &Query) -> Result<(), String> {
                     .sum::<Result<Sample, String>>()?
             };
             edges_cmd(&ctx, r, mask, *limit, *json)
+        }
+        Query::Log {
+            cap,
+            range,
+            decoder,
+            out,
+            timeline,
+        } => {
+            let ctx = Ctx::open(cap)?;
+            let d = ctx.decoded()?;
+            let r = ctx.range(range, Some(&d))?;
+            let w: Box<dyn Write> = match out {
+                Some(p) => Box::new(std::fs::File::create(p).map_err(|e| format!("{}: {e}", p.display()))?),
+                None => Box::new(io::stdout().lock()),
+            };
+            log_cmd(&ctx, &d, r, decoder.as_deref(), *timeline, &mut io::BufWriter::new(w)).map_err(|e| e.to_string())
         }
         Query::Levels { cap, at, json } => {
             let ctx = Ctx::open(cap)?;
@@ -1718,4 +1752,117 @@ fn clock_cmd(ctx: &Ctx, (from, to): (u64, u64), ch: u8, json: bool) -> Result<()
         println!("stopped between runs for {}", gaps.join(", "));
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------- log
+
+/// Complete bytes as hex, 32 per line with offsets past 32.
+fn hex_rows(b: &[u8], indent: &str) -> Vec<String> {
+    let row = |c: &[u8]| c.iter().map(|x| format!("{x:02x}")).collect::<Vec<_>>().join(" ");
+    if b.len() <= 32 {
+        return vec![format!("{indent}{}", row(b))];
+    }
+    b.chunks(32)
+        .enumerate()
+        .map(|(i, c)| format!("{indent}{:04x}: {}", i * 32, row(c)))
+        .collect()
+}
+
+fn log_cmd(
+    ctx: &Ctx,
+    d: &Decoded,
+    (from, to): (u64, u64),
+    decoder: Option<&str>,
+    timeline_only: bool,
+    w: &mut dyn Write,
+) -> io::Result<()> {
+    let evs: Vec<&Ev> = d
+        .events
+        .iter()
+        .filter(|e| e.start >= from && e.start < to && d.matches(e, decoder))
+        .filter(|e| !matches!(e.kind, Kind::Byte | Kind::Word))
+        .collect();
+    let seph = evs.iter().any(|e| e.text.starts_with("MCU→SE ") || e.text.starts_with("SE→MCU "));
+    // Directions of the ISO 7816 exchanges: the card answers the reset and
+    // the PPS, the reader requests it.
+    let (card, reader) = if seph {
+        ("SE→MCU", "MCU→SE")
+    } else {
+        ("card→reader", "reader→card")
+    };
+    let count = |p: &str| evs.iter().filter(|e| e.text.starts_with(p)).count();
+    let name = ctx.file.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned());
+    writeln!(w, "# {name}: decoded messages")?;
+    let decs: Vec<&str> = d.decoders.iter().map(String::as_str).collect();
+    writeln!(w, "# decoders: {}", decs.join("; "))?;
+    if seph {
+        let packets = count("MCU→SE ") + count("SE→MCU ");
+        writeln!(
+            w,
+            "# {} SE boots (ATRs), {packets} SEPROXYHAL packets, {} APDU commands",
+            count("ATR"),
+            count("C-APDU")
+        )?;
+        let mut tags: Vec<(String, usize)> = Vec::new();
+        for e in &evs {
+            if e.text.starts_with("MCU→SE ") || e.text.starts_with("SE→MCU ") {
+                let t = e.text.split(' ').nth(1).unwrap_or("").trim_end_matches(':').to_string();
+                match tags.iter_mut().find(|x| x.0 == t) {
+                    Some(x) => x.1 += 1,
+                    None => tags.push((t, 1)),
+                }
+            }
+        }
+        tags.sort_by_key(|t| std::cmp::Reverse(t.1));
+        writeln!(w, "# packets per tag:")?;
+        for (t, n) in &tags {
+            writeln!(w, "#   {n:7}  {t}")?;
+        }
+        writeln!(w)?;
+        writeln!(w, "== timeline ==")?;
+        let tl = visgrok::decode::seph::timeline(evs.iter().map(|e| (e.start, e.text.as_str(), e.data.as_deref())));
+        for m in &tl {
+            let span = match m.end {
+                Some(end) if end > m.start => format!("{:12.6} – {:<12.6}", ctx.secs(m.start), ctx.secs(end)),
+                _ => format!("{:12.6}{:15}", ctx.secs(m.start), ""),
+            };
+            writeln!(w, "{span}  {}", m.text)?;
+        }
+    }
+    if timeline_only {
+        return w.flush();
+    }
+    writeln!(w)?;
+    writeln!(w, "== messages ==")?;
+    writeln!(w, "# times in seconds; every message is followed by its complete bytes")?;
+    let indent = " ".repeat(14);
+    let mut boot = 0;
+    for e in evs {
+        let mut t = e.text.clone();
+        if t.starts_with("ATR") {
+            boot += 1;
+            writeln!(w)?;
+            writeln!(
+                w,
+                "==================== {} {boot} ====================",
+                if seph { "SE boot" } else { "ATR" }
+            )?;
+            t = format!("{card} {t}");
+        } else if t.starts_with("PPS request") {
+            t = format!("{reader} {t}");
+        } else if t.starts_with("PPS response") {
+            t = format!("{card} {t}");
+        } else if t.starts_with("C-APDU") {
+            t = format!(">>> {t}");
+        } else if t.starts_with("R-APDU") {
+            t = format!("<<< {t}");
+        }
+        writeln!(w, "{:12.6}  {t}", ctx.secs(e.start))?;
+        if let Some(b) = e.data.as_deref().filter(|b| !b.is_empty()) {
+            for r in hex_rows(b, &indent) {
+                writeln!(w, "{r}")?;
+            }
+        }
+    }
+    w.flush()
 }

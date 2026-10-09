@@ -94,6 +94,7 @@ visgrok events capture.vgk --grep ATR --json
 visgrok event capture.vgk --at 46.177  # one event: description, payload, every bit and field
 visgrok data capture.vgk -d SSD1306    # byte streams: UART/card characters, SPI words, display commands and writes
 visgrok screens capture.vgk -o screens # each distinct display screen as a PNG
+visgrok log capture.vgk -o capture.log # readable log: every decoded message with its complete bytes
 visgrok clock capture.vgk --ch CLK8M --session 1   # frequency, period spread, duty, drift
 visgrok edges capture.vgk --ch RESET   # raw transitions
 visgrok levels capture.vgk --at 46.18  # every channel's level at a moment
@@ -153,7 +154,14 @@ instructions, status words and version information:
 
 ```sh
 visgrok events ledger.vgk --uart-proto seproxyhal --grep APDU
+visgrok log ledger.vgk --uart-proto seproxyhal -o ledger.log   # timeline, then every message with its bytes
+visgrok log ledger.vgk --uart-proto seproxyhal --timeline      # what happened: boots, versions, USB/BLE, unlock, authentication, transfers
 ```
+
+The dashboard's authentication is broken down: nonces, the server's
+ephemeral key and the device's certificate and ephemeral key (public keys,
+DER signatures), in Ledger's certificate format (length-prefixed header,
+key and signature, not X.509).
 
 SD cards (native SD bus): commands and responses by name with CRC7 checks
 (R1 status/state, CID, CSD capacity, OCR/SDHC, RCA), data blocks with per-line
