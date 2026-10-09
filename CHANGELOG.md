@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/KarpelesLab/visgrok/compare/v0.1.1...v0.1.2) - 2026-10-09
+
+### Other
+
+- authentication handshake, timeline; `visgrok log` command
+- Ledger SEPROXYHAL decoder over ISO 7816; ISO 7816 without clock line
+- querying a capture from scripts and agents; ignore event caches
+- query commands for analyzing a capture (for people and agents)
+- always write the activity overview
+- ISO 7816: card clock and reset lines, sessions
+
 ## [0.1.1](https://github.com/KarpelesLab/visgrok/compare/v0.1.0...v0.1.1) - 2026-10-08
 
 ### Other
