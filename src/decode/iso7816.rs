@@ -9,10 +9,13 @@
 //!   protocol and Fi/Di, the check byte, and whether the card accepted;
 //! - later traffic grouped into frames (bursts separated by idle time),
 //!   identified as T=1 blocks (NAD, PCB, LEN, information field, LRC) when
-//!   they have that structure.
+//!   they have that structure; or, with [`Iso7816::seproxyhal`], decoded as
+//!   Ledger SEPROXYHAL packets (see [`super::seph`]).
 //!
-//! Without more lines, the underlying UART decoder finds the rate by itself
-//! (and follows the change after a PPS). With the card's **clock** and
+//! Characters are 8E2 unless another format is configured. Without more
+//! lines, the underlying UART decoder finds the rate by itself, and an
+//! accepted PPS sets the new rate from the Fi/Di it selects and the rate
+//! measured before (the clock is the same). With the card's **clock** and
 //! **reset** lines assigned, decoding follows the card's state instead:
 //!
 //! - each release of reset starts a new numbered session (reported as an
@@ -22,7 +25,8 @@
 //!   etu), measured from the clock, until a PPS selects other Fi/Di values
 //!   (reserved values leave the rate to automatic detection).
 
-use super::uart::{Uart, UartConfig};
+use super::seph::Seph;
+use super::uart::{Parity, Uart, UartConfig};
 use super::{Annotation, Decoder, Event};
 use crate::edges::Transition;
 
@@ -67,6 +71,18 @@ pub(crate) const DI: [Option<u32>; 16] = [
     None,
     None,
 ];
+
+/// Clock cycles per bit selected by a PPS1 byte (`None`: reserved values).
+/// Ledger devices (`ledger`) use the reserved Fi index 8 as 256: PPS1 0x87
+/// (Fi index 8, Di 64) gives 4 clocks per bit, 2 Mbaud on their ~8 MHz
+/// card clock.
+pub(crate) fn pps_etu(b: u8, ledger: bool) -> Option<f64> {
+    let f = match FI[(b >> 4) as usize] {
+        None if ledger && b >> 4 == 8 => Some(256),
+        f => f,
+    };
+    f.zip(DI[(b & 15) as usize]).map(|(f, d)| f as f64 / d as f64)
+}
 
 /// Describes a TA1 / PPS1 byte (`FI` high nibble, `DI` low nibble).
 pub(crate) fn fidi(b: u8) -> String {
@@ -139,12 +155,23 @@ pub struct Iso7816 {
     pps_request: Option<Vec<u8>>,
     /// Protocol from the ATR / PPS (0 or 1).
     protocol: u8,
+    /// Clock cycles per bit currently in use (372 until a PPS).
+    etu: f64,
+    /// SEPROXYHAL decoder for the traffic after the ATR / PPS.
+    seph: Option<Seph>,
     scratch: Vec<Annotation>,
 }
 
 impl Iso7816 {
-    /// Creates a decoder for the card I/O line described by `cfg`.
-    pub fn new(cfg: UartConfig, samplerate: u64) -> Iso7816 {
+    /// Creates a decoder for the card I/O line described by `cfg`. Without
+    /// a given frame format (`cfg.auto_format`), characters are 8E2.
+    pub fn new(mut cfg: UartConfig, samplerate: u64) -> Iso7816 {
+        if cfg.auto_format {
+            cfg.data_bits = 8;
+            cfg.parity = Parity::Even;
+            cfg.stop_bits = 2;
+            cfg.auto_format = false;
+        }
         Iso7816 {
             uart: Uart::new(cfg.clone(), samplerate),
             cfg,
@@ -159,8 +186,17 @@ impl Iso7816 {
             frame: Vec::new(),
             pps_request: None,
             protocol: 0,
+            etu: 372.0,
+            seph: None,
             scratch: Vec::new(),
         }
+    }
+
+    /// Decodes the traffic after the ATR and PPS as Ledger SEPROXYHAL
+    /// packets (the link between a Ledger secure element and its MCU).
+    pub fn seproxyhal(mut self) -> Iso7816 {
+        self.seph = Some(Seph::new());
+        self
     }
 
     /// Uses the card's clock line `clk` and reset line `rst` (either may be
@@ -171,7 +207,7 @@ impl Iso7816 {
         self.rst = rst;
         if clk.is_some() || rst.is_some() {
             self.cfg.data_bits = 8;
-            self.cfg.parity = super::uart::Parity::Even;
+            self.cfg.parity = Parity::Even;
             self.cfg.stop_bits = 2;
             self.cfg.auto_format = false;
             self.uart = Uart::new(self.cfg.clone(), self.samplerate);
@@ -227,6 +263,7 @@ impl Iso7816 {
             self.phase = Phase::Atr;
             self.pps_request = None;
             self.protocol = 0;
+            self.etu = 372.0;
             self.restart_uart(Some(372.0));
             let clock = match self.clock.samples_per_cycle() {
                 Some(spc) => format!(", card clock {}", crate::roles::fmt_hz(self.samplerate as f64 / spc)),
@@ -241,6 +278,9 @@ impl Iso7816 {
             self.handle(&ev, at, out);
             self.scratch = ev;
             self.frame_done(out);
+            if let Some(s) = self.seph.as_mut() {
+                s.reset(out);
+            }
             self.in_reset = true;
             Self::note(out, at, format!("── session {}: reset asserted ──", self.session));
         }
@@ -392,6 +432,13 @@ impl Iso7816 {
             Self::note_data(out, start, end, Self::describe_atr(&bytes), &bytes);
             self.phase = Phase::Session;
             self.pps_request = None;
+            if self.clk.is_none() && self.rst.is_none() {
+                // A new ATR: the card was reset, back to the default rate.
+                self.etu = 372.0;
+            }
+            if let Some(s) = self.seph.as_mut() {
+                s.reset(out);
+            }
             // The first offered protocol, until a PPS says otherwise.
             self.protocol = Self::atr_protocol(&bytes);
         } else if bytes[0] == 0xff && Self::pps_len(&bytes) == Some(bytes.len()) {
@@ -414,21 +461,37 @@ impl Iso7816 {
                         &bytes,
                     );
                     self.protocol = bytes[1] & 15;
+                    // The new rate applies from the next character.
+                    let p0 = bytes[1];
+                    let etu = if p0 & 0x10 != 0 {
+                        pps_etu(bytes[2], self.seph.is_some())
+                    } else {
+                        Some(372.0)
+                    };
                     if self.clk.is_some() && req == bytes {
-                        // The new rate applies from the next character.
-                        let p0 = bytes[1];
-                        let etu = if p0 & 0x10 != 0 {
-                            let b = bytes[2];
-                            FI[(b >> 4) as usize].zip(DI[(b & 15) as usize]).map(|(f, d)| f as f64 / d as f64)
-                        } else {
-                            Some(372.0)
-                        };
                         self.restart_uart(etu);
                         let what = match etu {
                             Some(e) => format!("{e} clock cycles per bit"),
                             None => "reserved Fi/Di, rate detected from the traffic".into(),
                         };
                         Self::note(out, end, format!("── new rate: {what} ──"));
+                    } else if req == bytes
+                        && let (Some(e), Some(baud)) = (etu, self.uart.baud())
+                    {
+                        // No clock line: the clock is the one that gave the
+                        // current rate, so the new bit time follows from
+                        // the ratio of the etus.
+                        let bit = self.samplerate as f64 / baud * e / self.etu;
+                        self.etu = e;
+                        self.uart.set_bit_time(bit, end, out);
+                        Self::note(
+                            out,
+                            end,
+                            format!(
+                                "── new rate: {e} clock cycles per bit, {} baud ──",
+                                super::uart::nice_baud(self.samplerate as f64 / bit)
+                            ),
+                        );
                     }
                 }
             }
@@ -479,6 +542,21 @@ impl Iso7816 {
             out.push(a.clone());
             match a.event {
                 Event::UartByte { value, .. } => {
+                    if let Some(seph) = self.seph.as_mut() {
+                        // ATRs and PPS exchanges stay with the ISO layer
+                        // (0x3b and 0xff are no SEPROXYHAL tags).
+                        let v = value as u8;
+                        let iso =
+                            !self.frame.is_empty() || seph.idle() && (v == 0x3b || v == 0xff || v == 0x3f && self.phase == Phase::Atr);
+                        if !iso {
+                            seph.push(v, a.start, a.end, out);
+                            continue;
+                        }
+                        if self.frame.is_empty() && v == 0x3b {
+                            // An ATR between packets: the SE was reset.
+                            self.phase = Phase::Atr;
+                        }
+                    }
                     if let Some(&(_, _, last)) = self.frame.last()
                         && a.start.saturating_sub(last) > self.gap()
                     {
@@ -496,6 +574,9 @@ impl Iso7816 {
                 Event::UartBreak => {
                     // A long low line: the card was probably reset.
                     self.frame_done(out);
+                    if let Some(s) = self.seph.as_mut() {
+                        s.flush(out);
+                    }
                     self.phase = Phase::Atr;
                 }
                 _ => {}
@@ -505,6 +586,13 @@ impl Iso7816 {
             && now.saturating_sub(last) > self.gap()
         {
             self.frame_done(out);
+        }
+        // A packet interrupted for 20 ms won't be completed.
+        let limit = self.samplerate / 50;
+        if let Some(s) = self.seph.as_mut()
+            && s.pending_since().is_some_and(|last| now.saturating_sub(last) > limit)
+        {
+            s.flush(out);
         }
     }
 }
@@ -518,11 +606,12 @@ impl Decoder for Iso7816 {
         if let Some(c) = self.rst {
             lines += &format!(" rst=ch{c}");
         }
+        let proto = if self.seph.is_some() { "ISO7816 SEPH" } else { PROTO };
         if lines.is_empty() {
-            return format!("{PROTO} ({})", self.uart.name());
+            return format!("{proto} ({})", self.uart.name());
         }
         // The rate follows the card; keep the name stable.
-        format!("{PROTO}{lines} (UART ch{})", self.cfg.channel)
+        format!("{proto}{lines} (UART ch{})", self.cfg.channel)
     }
 
     fn channels(&self) -> u32 {
@@ -705,6 +794,13 @@ mod tests {
         assert_eq!(t[1], "PPS request: T=0, PPS1=87 Fi index 8 Di index 7 (reserved values), PCK ok");
         assert!(t[2].starts_with("PPS response (accepted)"), "{}", t[2]);
         assert_eq!(t[3], "T=1 I-block seq 0, NAD 00, 3 bytes: a0 b1 c2 (LRC ok)");
+    }
+
+    #[test]
+    fn ledger_pps() {
+        assert_eq!(pps_etu(0x97, true), Some(8.0));
+        assert_eq!(pps_etu(0x87, true), Some(4.0));
+        assert_eq!(pps_etu(0x87, false), None);
     }
 
     #[test]

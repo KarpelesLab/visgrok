@@ -139,6 +139,22 @@ the selected Fi/Di:
 visgrok -i card.vgk --headless -r 0=iso-clk -r 1=iso-rst -r 2=iso-io
 ```
 
+Without those lines, characters are still 8E2, the rate is measured from the
+ATR, and an accepted PPS sets the new rate from its Fi/Di.
+
+Ledger devices (`--uart-proto seproxyhal`): the link between the secure
+element and the MCU is ISO 7816 (a single I/O line is enough). After the ATR
+and PPS, the traffic is decoded as SEPROXYHAL packets: events from the MCU
+(ticker, buttons, status, USB and BLE traffic) and the SE's commands and
+statuses, with USB control transfers (descriptors), BLE HCI commands and
+events, and the APDUs exchanged with the host reassembled from USB HID
+reports or BLE GATT writes (Ledger transport framing), with known
+instructions, status words and version information:
+
+```sh
+visgrok events ledger.vgk --uart-proto seproxyhal --grep APDU
+```
+
 SD cards (native SD bus): commands and responses by name with CRC7 checks
 (R1 status/state, CID, CSD capacity, OCR/SDHC, RCA), data blocks with per-line
 CRC16 in 1- or 4-bit mode, write CRC status tokens and busy times:
@@ -148,8 +164,9 @@ visgrok -c 8 -s 200M -r 0=sd-clk -r 1=sd-cmd -r 2=sd-dat0 -r 3=sd-dat1 -r 4=sd-d
 ```
 
 Sample at least 4× the SD clock (default speed 25 MHz → 100 MHz or more;
-high speed 50 MHz → 200 MHz+). UHS-I SDR50/SDR104 clocks are too fast. UART options: `--uart-format auto|8N1|8E2|...`, `--uart-proto raw|iso7816`
-(smart cards: ATR with Fi/Di and protocols, PPS request/response, T=1 blocks).
+high speed 50 MHz → 200 MHz+). UHS-I SDR50/SDR104 clocks are too fast. UART options: `--uart-format auto|8N1|8E2|...`, `--uart-proto raw|iso7816|seproxyhal`
+(smart cards: ATR with Fi/Di and protocols, PPS request/response, T=1 blocks;
+Ledger SE ↔ MCU packets).
 SPI options: `--spi-mode 0..3`
 (default: polarity from the idle clock, CPHA 0), `--spi-cs-high`,
 `--spi-proto raw|ssd1306|ssd1306:128x32` (no D/C pin: 3-wire 9-bit mode).

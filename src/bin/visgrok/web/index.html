@@ -102,7 +102,7 @@ footer { display: grid; grid-template-columns: 1fr; border-top: 1px solid var(--
   </div>
   <div class="group">
     <label>SPI</label><select id="spiproto"><option value="raw">raw</option><option value="ssd1306">SSD1306 128×64</option><option value="ssd1306:128x32">SSD1306 128×32</option></select>
-    <label>UART</label><select id="uartproto" title="Protocol on the UART"><option value="raw">bytes</option><option value="iso7816">ISO 7816</option></select><select id="uartfmt"><option value="auto">auto</option><option>8N1</option><option>8E1</option><option>8E2</option><option>8O1</option><option>7E1</option></select>
+    <label>UART</label><select id="uartproto" title="Protocol on the UART"><option value="raw">bytes</option><option value="iso7816">ISO 7816</option><option value="seproxyhal">Ledger SEPROXYHAL</option></select><select id="uartfmt"><option value="auto">auto</option><option>8N1</option><option>8E1</option><option>8E2</option><option>8O1</option><option>7E1</option></select>
   </div>
   <div class="group">
     <select id="marks" title="Bookmarks (b: add at cursor, B: remove nearest)"><option value="">Bookmarks…</option></select>

@@ -898,7 +898,11 @@ fn uart_event(req: &Request, sig: &Signal, ch: u8, iso: bool, out: &mut Out) {
         from = at(nbits - fmt.stop) + 1;
     }
     if iso {
-        iso_meaning(req.text, &chars, out);
+        if req.text.starts_with("MCU→SE") || req.text.starts_with("SE→MCU") {
+            seph_meaning(req.text, &chars, out);
+        } else {
+            iso_meaning(req.text, &chars, out);
+        }
     }
 }
 
@@ -1091,6 +1095,43 @@ fn iso_meaning(text: &str, chars: &[(u64, u64, u8)], out: &mut Out) {
                 format!("XOR of the block {}", if ok { "is 0, ok" } else { "is not 0 (mismatch)" }),
             );
         }
+    }
+}
+
+/// What the characters of a Ledger SEPROXYHAL packet stand for.
+fn seph_meaning(text: &str, chars: &[(u64, u64, u8)], out: &mut Out) {
+    use crate::decode::seph::{direction, tag_name};
+    if chars.len() < 3 {
+        return;
+    }
+    let tag = chars[0].2;
+    let len = u16::from_be_bytes([chars[1].2, chars[2].2]) as usize;
+    let name = tag_name(tag).unwrap_or("unknown tag");
+    let kind = match tag {
+        0..0x30 => "event",
+        0x30..0x60 => "command",
+        _ => "status",
+    };
+    out.field(
+        "meaning",
+        chars[0].0,
+        chars[0].1,
+        "tag",
+        format!("{tag:#04x} {name}: {kind}, {}", direction(tag)),
+        false,
+    );
+    out.field(
+        "meaning",
+        chars[1].0,
+        chars[2].1,
+        format!("length {len}"),
+        format!("{len} payload bytes follow (big endian)"),
+        false,
+    );
+    if len > 0 && chars.len() > 3 {
+        let last = (3 + len).min(chars.len()) - 1;
+        let detail = text.split_once(": ").map_or(String::new(), |(_, d)| d.to_string());
+        out.field("meaning", chars[3].0, chars[last].1, "payload", detail, false);
     }
 }
 
@@ -1311,6 +1352,30 @@ mod tests {
         let labels: Vec<&str> = out.0.iter().map(|f| f.label.as_str()).collect();
         assert_eq!(labels, ["PPSS", "PPS0", "PPS1", "PCK"]);
         assert!(out.0[3].detail.contains("ok"));
+    }
+
+    #[test]
+    fn seproxyhal_packet() {
+        let chars: Vec<(u64, u64, u8)> = [0x4e, 0x00, 0x02, 0x00, 0x64]
+            .iter()
+            .enumerate()
+            .map(|(i, &b)| (i as u64 * 12, i as u64 * 12 + 12, b))
+            .collect();
+        let mut out = Out::default();
+        seph_meaning("SE→MCU SET_TICKER_INTERVAL: every 100 ms", &chars, &mut out);
+        let f: Vec<(&str, &str, u64, u64)> = out
+            .0
+            .iter()
+            .map(|f| (f.label.as_str(), f.detail.as_str(), f.start, f.end))
+            .collect();
+        assert_eq!(
+            f,
+            [
+                ("tag", "0x4e SET_TICKER_INTERVAL: command, SE→MCU", 0, 12),
+                ("length 2", "2 payload bytes follow (big endian)", 12, 36),
+                ("payload", "every 100 ms", 36, 60),
+            ]
+        );
     }
 
     /// An SD command frame (CMD17, arg 0x1000) on a synthetic bus.

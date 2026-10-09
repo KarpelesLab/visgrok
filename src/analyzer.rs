@@ -74,15 +74,18 @@ pub enum UartProtocol {
     Raw,
     /// ISO 7816-3 smart card (ATR, PPS, T=1 blocks).
     Iso7816,
+    /// Ledger SEPROXYHAL packets (secure element ↔ MCU) over ISO 7816.
+    Seproxyhal,
 }
 
 impl UartProtocol {
-    /// Parses `raw` or `iso7816`.
+    /// Parses `raw`, `iso7816` or `seproxyhal`.
     pub fn parse(s: &str) -> Result<UartProtocol, String> {
         match s.to_ascii_lowercase().as_str() {
             "raw" | "none" | "uart" => Ok(UartProtocol::Raw),
             "iso7816" | "iso-7816" | "smartcard" | "sim" => Ok(UartProtocol::Iso7816),
-            _ => Err(format!("unknown UART protocol {s:?} (raw, iso7816)")),
+            "seproxyhal" | "seph" | "ledger" => Ok(UartProtocol::Seproxyhal),
+            _ => Err(format!("unknown UART protocol {s:?} (raw, iso7816, seproxyhal)")),
         }
     }
 
@@ -91,6 +94,7 @@ impl UartProtocol {
         match self {
             UartProtocol::Raw => "raw",
             UartProtocol::Iso7816 => "iso7816",
+            UartProtocol::Seproxyhal => "seproxyhal",
         }
     }
 }
@@ -299,9 +303,11 @@ impl Analyzer {
                         cfg.auto_format = false;
                     }
                     let lines = (find(&Role::IsoClk), find(&Role::IsoRst));
+                    let iso = || Iso7816::new(cfg.clone(), self.samplerate).with_lines(lines.0, lines.1);
                     match opts.uart_protocol {
-                        UartProtocol::Raw => out.push(Box::new(Uart::new(cfg, self.samplerate))),
-                        _ => out.push(Box::new(Iso7816::new(cfg, self.samplerate).with_lines(lines.0, lines.1))),
+                        UartProtocol::Raw => out.push(Box::new(Uart::new(cfg.clone(), self.samplerate))),
+                        UartProtocol::Iso7816 => out.push(Box::new(iso())),
+                        UartProtocol::Seproxyhal => out.push(Box::new(iso().seproxyhal())),
                     }
                 }
                 Role::IsoIo => {
@@ -313,7 +319,11 @@ impl Analyzer {
                         cfg.auto_format = false;
                     }
                     let d = Iso7816::new(cfg, self.samplerate).with_lines(find(&Role::IsoClk), find(&Role::IsoRst));
-                    out.push(Box::new(d));
+                    if opts.uart_protocol == UartProtocol::Seproxyhal {
+                        out.push(Box::new(d.seproxyhal()));
+                    } else {
+                        out.push(Box::new(d));
+                    }
                 }
                 Role::I2cScl { sda } => out.push(Box::new(I2c::new(i as u8, *sda))),
                 Role::SdClk => {

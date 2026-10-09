@@ -96,7 +96,8 @@ pub struct Args {
     /// 7E1, ... to force one.
     #[arg(long, default_value = "auto")]
     uart_format: String,
-    /// Protocol on top of UART: raw, iso7816 (smart card: ATR, PPS, T=1).
+    /// Protocol on top of UART: raw, iso7816 (smart card: ATR, PPS, T=1),
+    /// seproxyhal (Ledger secure element ↔ MCU link, over ISO 7816).
     #[arg(long, default_value = "raw", value_parser = UartProtocol::parse)]
     uart_proto: UartProtocol,
     /// Keep UART rates given with --role fixed instead of following changes.

@@ -233,10 +233,10 @@ impl Sidecar {
             match r {
                 Some(Role::Uart { baud }) => out.push(format!(
                     "{} on {} ({}, {})",
-                    if self.options.uart_protocol == UartProtocol::Iso7816 {
-                        "ISO 7816 (UART)"
-                    } else {
-                        "UART"
+                    match self.options.uart_protocol {
+                        UartProtocol::Iso7816 => "ISO 7816 (UART)",
+                        UartProtocol::Seproxyhal => "Ledger SEPROXYHAL over ISO 7816 (UART)",
+                        _ => "UART",
                     },
                     name(i),
                     if *baud == 0 {

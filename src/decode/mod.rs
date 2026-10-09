@@ -1,8 +1,10 @@
 //! Streaming protocol decoders working on transitions.
 
+pub mod hci;
 pub mod i2c;
 pub mod iso7816;
 pub mod sd;
+pub mod seph;
 pub mod spi;
 pub mod ssd1306;
 pub mod uart;

@@ -50,7 +50,7 @@ pub struct Cap {
     /// SPI mode 0..3.
     #[arg(long)]
     pub spi_mode: Option<u8>,
-    /// Protocol on top of UART: raw, iso7816.
+    /// Protocol on top of UART: raw, iso7816, seproxyhal.
     #[arg(long, value_parser = UartProtocol::parse)]
     pub uart_proto: Option<UartProtocol>,
     /// UART frame format: auto, 8N1, 8E2, ...
