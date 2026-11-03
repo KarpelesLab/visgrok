@@ -1511,9 +1511,9 @@ fn screens_cmd(ctx: &Ctx, d: &Decoded, (from, to): (u64, u64), out: &Path, scale
 fn render_png(s: &Screen, scale: u32) -> Result<Vec<u8>, String> {
     let (w, h) = (s.width as u32 * scale, s.height as u32 * scale);
     let (on, off) = if s.on {
-        ([0xe8, 0xf4, 0xff], [0x08, 0x0a, 0x10])
+        ([0xff, 0xff, 0xff], [0x00, 0x00, 0x00])
     } else {
-        ([0x60, 0x66, 0x70], [0x08, 0x0a, 0x10])
+        ([0x60, 0x60, 0x60], [0x00, 0x00, 0x00])
     };
     let mut rgb = Vec::with_capacity((w * h * 3) as usize);
     for y in 0..h {

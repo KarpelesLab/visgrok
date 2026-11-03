@@ -478,7 +478,7 @@ fn draw_display(f: &mut Frame, area: Rect, d: &DisplayView) {
         }
         lines.push(Line::raw(row));
     }
-    let color = if d.on { Color::Cyan } else { Color::DarkGray };
+    let color = if d.on { Color::White } else { Color::DarkGray };
     f.render_widget(Paragraph::new(lines).style(Style::default().fg(color)), inner);
 }
 

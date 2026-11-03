@@ -489,11 +489,11 @@ function onDisplay(m) {
   const scale = Math.max(1, Math.floor(320 / m.width));
   c.style.width = m.width * scale + "px"; c.style.height = m.height * scale + "px";
   const img = g.createImageData(m.width, m.height);
-  const on = m.on ? [140, 210, 255] : [70, 90, 110];
+  const on = m.on ? [255, 255, 255] : [96, 96, 96];
   m.rows.forEach((row, y) => {
     for (let x = 0; x < m.width; x++) {
       const bit = (parseInt(row[x >> 2], 16) >> (3 - (x & 3))) & 1, i = (y * m.width + x) * 4;
-      const [r, gg, b] = bit ? on : [8, 11, 15];
+      const [r, gg, b] = bit ? on : [0, 0, 0];
       img.data[i] = r; img.data[i + 1] = gg; img.data[i + 2] = b; img.data[i + 3] = 255;
     }
   });
