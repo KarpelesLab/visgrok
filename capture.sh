@@ -7,7 +7,10 @@
 #        the PPS selects a faster rate), decoded as Ledger SEPROXYHAL packets
 #        with APDUs reassembled; characters are timed from the clock on D0
 #        and each reset release on D1 starts a new session
-#   D3 = SPI SCLK   D4 = SPI D/C   D5 = SPI CS   D6 = SPI MOSI   (SSD1306 OLED)
+#   D3 = SPI CS   D4 = SPI SCLK   D5 = SPI D/C   D6 = SPI MOSI   (SSD1306 OLED)
+#   (confirmed 2026-11-04 by decoding a clean "LEDGER" logo; the probe order was
+#    found shifted from the old D3=SCLK/D4=DC/D5=CS labels. CS is active-low,
+#    pulsed per byte; DC low=command, high=data; SCLK is the ~1.6 MHz bit clock.)
 #
 # 8 channels at 200 MHz (200 MB/s, a rate with no USB losses in testing):
 # 25 samples per 8 MHz clock cycle, 100 per bit at 2 Mbaud, 10 per SPI
@@ -31,9 +34,9 @@ OUT=${OUT-capture-$(date +%Y%m%d-%H%M%S).vgk}
 cargo build --release -q
 
 set -- -c 8 -s "$RATE" \
-    -n 0=CLK8M -n 1=RESET -n 2=UART -n 3=SCLK -n 4=DC -n 5=CS -n 6=MOSI \
+    -n 0=CLK8M -n 1=RESET -n 2=UART -n 3=CS -n 4=SCLK -n 5=DC -n 6=MOSI \
     -r 0=iso-clk -r 1=iso-rst -r 2=iso-io --uart-proto seproxyhal \
-    -r 3=spi-clk -r 4=spi-dc -r 5=spi-cs -r 6=spi-mosi --spi-proto ssd1306 \
+    -r 4=spi-clk -r 3=spi-cs -r 5=spi-dc -r 6=spi-mosi --spi-proto ssd1306 \
     "$@"
 [ -n "$OUT" ] && set -- "$@" -o "$OUT"
 [ -n "${THRESHOLD:-}" ] && set -- "$@" -t "$THRESHOLD"
