@@ -25,6 +25,16 @@
 # Extra arguments are passed to visgrok, e.g. `./capture.sh --headless`.
 # Afterwards: `visgrok log FILE -o FILE.log` for the timeline and every
 # message (the roles and protocols are saved in the capture's sidecar).
+#
+# https://github.com/KarpelesLab/ledger_nano_x_pads
+# 0 = CLK8M = TP 30
+# 1 = RESET = TP 29
+# 2 = UART = TP 32
+# 3 = CS = TP 31
+# 4 = SCLK = TP 34
+# 5 = DC = TP 36
+# 6 = MOSI = TP 35
+
 set -eu
 cd "$(dirname "$0")"
 
