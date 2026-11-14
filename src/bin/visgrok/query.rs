@@ -1452,7 +1452,7 @@ fn screens_cmd(ctx: &Ctx, d: &Decoded, (from, to): (u64, u64), out: &Path, scale
     let shots: Vec<&Screen> = d.screens.iter().filter(|s| s.at >= from && s.at < to).collect();
     if shots.is_empty() {
         let hint = if d.screens.is_empty() {
-            "no display decoder output (assign SPI roles with --spi-proto ssd1306)"
+            "no display decoder output (assign SPI roles with --spi-proto ssd1306, or decode a Nano S SE link with --uart-proto seproxyhal)"
         } else {
             "no screen updates in that range"
         };

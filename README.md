@@ -158,6 +158,15 @@ visgrok log ledger.vgk --uart-proto seproxyhal -o ledger.log   # timeline, then 
 visgrok log ledger.vgk --uart-proto seproxyhal --timeline      # what happened: boots, versions, USB/BLE, unlock, authentication, transfers
 ```
 
+Legacy devices whose MCU draws the screen for the SE (Nano S, Blue) send
+it as BAGL elements (`SCREEN_DISPLAY_STATUS`: rectangles, labels, icons with
+their bitmaps); these are drawn into a picture of the screen, shown live and
+written by `visgrok screens`. The MCU's own fonts and glyphs are not on the
+wire: text uses a built-in 5x7 font and only common glyphs (arrows, check,
+cross) are approximated. The Nano S negotiates 3 Mbaud (PPS1 `0x98`, 4 clock
+cycles per bit on its 12 MHz clock); reset pulses shorter than ISO 7816's
+400 clock cycles are ignored as glitches.
+
 The dashboard's authentication is broken down: nonces, the server's
 ephemeral key and the device's certificate and ephemeral key (public keys,
 DER signatures), in Ledger's certificate format (length-prefixed header,

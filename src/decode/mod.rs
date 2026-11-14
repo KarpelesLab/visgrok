@@ -1,5 +1,6 @@
 //! Streaming protocol decoders working on transitions.
 
+pub mod bagl;
 pub mod hci;
 pub mod i2c;
 pub mod iso7816;

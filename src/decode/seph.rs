@@ -14,11 +14,18 @@
 //! in `BLE_RECV_EVENT` / `BLE_SEND`), framed by Ledger's transport protocol
 //! (`channel (USB only) | 0x05 | sequence | length (first chunk) | data`).
 //!
+//! On devices whose MCU draws the screen for the SE (Nano S, Blue: the
+//! legacy protocol), the display elements the SE sends
+//! (`SCREEN_DISPLAY_STATUS`, BAGL components, see [`super::bagl`]) are
+//! drawn into a picture of the screen, reported as a frame each time the
+//! SE finishes a series of them.
+//!
 //! Tag values and payload layouts follow Ledger's secure SDKs
 //! (`seproxyhal_protocol.h`, current and Nano X/S versions).
 
+use super::bagl::{self, Canvas, RawState};
 use super::hci;
-use super::{Annotation, Event};
+use super::{Annotation, DisplayView, Event};
 
 pub(crate) const PROTO: &str = "SEPH";
 
@@ -206,6 +213,19 @@ pub struct Seph {
     last_cmd: Vec<(Transport, Vec<u8>)>,
     /// Packets decoded.
     packets: u64,
+    /// The screen drawn from BAGL elements (legacy devices), once one was
+    /// sent.
+    screen: Option<Canvas>,
+    /// Screen size from the MCU's session start (128x32 until then).
+    screen_size: Option<(usize, usize)>,
+    /// Panel off (`SET_SCREEN_CONFIG` without the power-on flag).
+    screen_off: bool,
+    /// End of the last display packet of a series not reported yet.
+    screen_dirty: Option<u64>,
+    /// Frames reported.
+    screen_updates: u64,
+    /// Raw bitmap being received (`SCREEN_DISPLAY_RAW_STATUS`).
+    raw: Option<RawState>,
 }
 
 impl Seph {
@@ -231,8 +251,28 @@ impl Seph {
         self.last_cmd.clear();
     }
 
+    /// The screen drawn from the display elements received, if any.
+    pub fn display(&self) -> Option<DisplayView> {
+        self.screen.as_ref().map(|c| c.view("BAGL", !self.screen_off, self.screen_updates))
+    }
+
+    /// Reports the screen after a series of display packets.
+    fn flush_screen(&mut self, out: &mut Vec<Annotation>) {
+        if let (Some(at), Some(_)) = (self.screen_dirty.take(), &self.screen) {
+            self.screen_updates += 1;
+            let v = self.display().expect("screen");
+            out.push(Annotation::new(at, at, Event::Frame(std::sync::Arc::new(v))));
+        }
+    }
+
+    fn canvas(&mut self) -> &mut Canvas {
+        let (w, h) = self.screen_size.unwrap_or((128, 32));
+        self.screen.get_or_insert_with(|| Canvas::new(w, h))
+    }
+
     /// Reports a partly received packet and pending noise.
     pub fn flush(&mut self, out: &mut Vec<Annotation>) {
+        self.flush_screen(out);
         if !self.buf.is_empty() {
             let b = std::mem::take(&mut self.buf);
             let what = match b.len() {
@@ -306,6 +346,15 @@ impl Seph {
         self.packets += 1;
         let (tag, payload) = (p[0], &p[3..]);
         let (start, end) = (self.start, self.last);
+        // The SE draws a screen with display packets, each acknowledged by
+        // the MCU; anything else ends the series.
+        if matches!(tag, 0x65 | 0x69 | 0x0d) {
+            if self.screen_dirty.is_some() {
+                self.screen_dirty = Some(end);
+            }
+        } else {
+            self.flush_screen(out);
+        }
         let mut apdus = Vec::new();
         let detail = self.describe(tag, payload, start, end, &mut apdus);
         let name = tag_name(tag).unwrap_or("?");
@@ -385,7 +434,21 @@ impl Seph {
 
     fn describe(&mut self, tag: u8, p: &[u8], start: u64, end: u64, out: &mut Vec<Annotation>) -> String {
         match tag {
-            0x01 => session_start(p),
+            0x01 => {
+                // The screen the MCU drives (SEPROXYHAL_TAG_SESSION_START_
+                // EVENT_FEATURE_SCREEN_*).
+                let size = match be32(p, 1).map(|f| f & 0xf00) {
+                    Some(0x100) => Some((320, 480)),
+                    Some(0x200) => Some((128, 32)),
+                    Some(0x300) => Some((128, 64)),
+                    _ => None,
+                };
+                if size.is_some() && size != self.screen_size {
+                    self.screen_size = size;
+                    self.screen = None;
+                }
+                session_start(p)
+            }
             0x05 => p.first().map_or(String::new(), |&m| {
                 let mut b = Vec::new();
                 if m & 2 != 0 {
@@ -472,12 +535,15 @@ impl Seph {
                     _ => s,
                 }
             }
-            0x3e if p.len() >= 2 => format!(
-                "flags {:#04x}{}, brightness {}%",
-                p[0],
-                if p[0] & 0x80 != 0 { " (power on)" } else { "" },
-                p[1]
-            ),
+            0x3e if p.len() >= 2 => {
+                self.screen_off = p[0] & 0x80 == 0;
+                format!(
+                    "flags {:#04x}{}, brightness {}%",
+                    p[0],
+                    if p[0] & 0x80 != 0 { " (power on)" } else { "" },
+                    p[1]
+                )
+            }
             0x44 => p.first().map_or(String::new(), |&a| {
                 let mut v = Vec::new();
                 if a & 0x02 != 0 {
@@ -515,10 +581,52 @@ impl Seph {
                 Some(s) => format!("status {s:#06x}"),
                 None => String::new(),
             },
-            0x65 | 0x5e => bagl(p),
+            0x65 => {
+                if let Some((c, extra)) = bagl::Component::parse(p) {
+                    self.canvas().draw(&c, extra);
+                    self.screen_dirty = Some(end);
+                }
+                bagl::describe(p)
+            }
+            0x5e => bagl::describe(p),
+            0x69 => self.raw_display(p, end),
             0x67 if p.len() >= 2 => format!("{} MHz, etu {}", p[0], p[1]),
             _ if p.is_empty() => String::new(),
             _ => format!("{} bytes: {}", p.len(), hex_trunc(p, 24)),
+        }
+    }
+
+    /// A raw bitmap for the screen: a start packet with its position, size
+    /// and palette, then continuation packets with more pixels.
+    fn raw_display(&mut self, p: &[u8], end: u64) -> String {
+        match p.first() {
+            Some(0) => {
+                let st = self.canvas().raw_start(p);
+                let s = match &st {
+                    Some(_) => format!(
+                        "raw bitmap at {},{} size {}x{}, {} bpp",
+                        be16(p, 1).unwrap_or(0) as i16,
+                        be16(p, 3).unwrap_or(0) as i16,
+                        be16(p, 5).unwrap_or(0),
+                        be16(p, 7).unwrap_or(0),
+                        p.get(9).copied().unwrap_or(0)
+                    ),
+                    None => format!("raw bitmap start, {} bytes: {}", p.len(), hex_trunc(p, 16)),
+                };
+                self.raw = st;
+                self.screen_dirty = Some(end);
+                s
+            }
+            Some(1) => {
+                if let Some(mut st) = self.raw.take() {
+                    st.bits.extend_from_slice(&p[1..]);
+                    self.canvas().raw_draw(&st);
+                    self.raw = Some(st);
+                    self.screen_dirty = Some(end);
+                }
+                format!("raw bitmap, {} more bytes", p.len() - 1)
+            }
+            _ => hex_trunc(p, 16),
         }
     }
 
@@ -868,6 +976,7 @@ fn session_start(p: &[u8]) -> String {
     match f & 0xf00 {
         0 => {}
         0x100 => feats.push("big screen".into()),
+        0x200 => feats.push("small screen".into()),
         0x300 => feats.push("SSD1312 screen".into()),
         x => feats.push(format!("screen {x:#05x}")),
     }
@@ -898,7 +1007,9 @@ fn session_start(p: &[u8]) -> String {
             fields.push(format!("{} trailing bytes: {}", rest.len(), hex_trunc(rest, 24)));
             break;
         }
+        // The Nano S sends its version NUL terminated.
         let v = &r[..n as usize];
+        let v = v.strip_suffix(&[0]).unwrap_or(v);
         let val = if v.is_empty() {
             "blank".to_string()
         } else if printable(v) {
@@ -1120,33 +1231,6 @@ fn descriptor(d: &[u8]) -> String {
         (Some(_), Some(0x0f)) if d.len() >= 5 => format!("BOS descriptor, {} capabilities", d[4]),
         _ => hex_trunc(d, 24),
     }
-}
-
-/// A BAGL display element (`SCREEN_DISPLAY_STATUS`, little endian).
-fn bagl(p: &[u8]) -> String {
-    if p.len() < 28 {
-        return format!("{} bytes: {}", p.len(), hex_trunc(p, 24));
-    }
-    let le = |i: usize| i16::from_le_bytes([p[i], p[i + 1]]);
-    let ty = match p[0] {
-        0 => "none".to_string(),
-        1 => "button".into(),
-        2 => "label".into(),
-        3 => "rectangle".into(),
-        4 => "line".into(),
-        5 => "icon".into(),
-        6 => "circle".into(),
-        7 => "label line".into(),
-        t => format!("type {t}"),
-    };
-    let mut s = format!("{ty} id {} at {},{} size {}x{}", p[1], le(2), le(4), le(6), le(8));
-    let txt = &p[28..];
-    if printable(txt) {
-        s += &format!(" \"{}\"", text(txt));
-    } else if !txt.is_empty() {
-        s += &format!(", {} bytes: {}", txt.len(), hex_trunc(txt, 16));
-    }
-    s
 }
 
 /// The text between `"` after `label`, e.g. `"2.39.0"` in
@@ -1499,6 +1583,49 @@ mod tests {
             descriptor(&[0x0e, 0x03, b'N', 0, b'a', 0, b'n', 0, b'o', 0, b' ', 0, b'X', 0]),
             "string descriptor \"Nano X\""
         );
+    }
+
+    /// A legacy (Nano S) screen: display packets, each acknowledged by the
+    /// MCU, then a status ends the series and the screen is reported.
+    #[test]
+    fn bagl_screen() {
+        let mut s = Seph::new();
+        let mut out = Vec::new();
+        let mut t = 0;
+        let mut send = |s: &mut Seph, bytes: &[u8], out: &mut Vec<Annotation>| {
+            for &b in bytes {
+                s.push(b, t, t + 1, out);
+                t += 2;
+            }
+        };
+        // Clear the screen (filled black rectangle), then a 7x4 "up" glyph.
+        let mut clear = vec![0x65, 0x00, 28, 3, 0, 0, 0, 0, 0, 128, 0, 32, 0, 0, 0, 1];
+        clear.resize(3 + 28, 0);
+        clear[3 + 20..3 + 23].copy_from_slice(&[0xff, 0xff, 0xff]);
+        let mut up = vec![0x65, 0x00, 28, 5, 0, 118, 0, 14, 0, 7, 0, 4, 0];
+        up.resize(3 + 28, 0);
+        up[3 + 16..3 + 19].copy_from_slice(&[0xff, 0xff, 0xff]);
+        up[3 + 26] = 11;
+        send(&mut s, &clear, &mut out);
+        send(&mut s, &[0x0d, 0, 0], &mut out);
+        send(&mut s, &up, &mut out);
+        send(&mut s, &[0x0d, 0, 0], &mut out);
+        assert!(!out.iter().any(|a| matches!(a.event, Event::Frame(_))));
+        send(&mut s, &[0x60, 0, 2, 0, 0], &mut out);
+        let frames: Vec<&DisplayView> = out
+            .iter()
+            .filter_map(|a| match &a.event {
+                Event::Frame(v) => Some(&**v),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(frames.len(), 1);
+        let v = frames[0];
+        assert_eq!((v.width, v.height, v.updates), (128, 32, 1));
+        let lit: Vec<(usize, usize)> = (0..v.pixels.len()).filter(|&i| v.pixels[i]).map(|i| (i % 128, i / 128)).collect();
+        assert_eq!(lit.len(), 7);
+        assert!(lit.contains(&(121, 14)) && lit.contains(&(118, 17)) && lit.contains(&(124, 17)));
+        assert_eq!(s.display().unwrap().pixels, v.pixels);
     }
 
     #[test]

@@ -73,15 +73,21 @@ pub(crate) const DI: [Option<u32>; 16] = [
 ];
 
 /// Clock cycles per bit selected by a PPS1 byte (`None`: reserved values).
-/// Ledger devices (`ledger`) use the reserved Fi index 8 as 256: PPS1 0x87
-/// (Fi index 8, Di 64) gives 4 clocks per bit, 2 Mbaud on their ~8 MHz
-/// card clock.
+/// Ledger devices (`ledger`) extend the tables by powers of two: the
+/// reserved Fi index 8 is 256 and Di index 8 is 128 (not 12). PPS1 0x87
+/// (Fi 256, Di 64, Nano X) and 0x98 (Fi 512, Di 128, Nano S) both give 4
+/// clocks per bit: 2 Mbaud on the Nano X's ~8 MHz card clock, 3 Mbaud on
+/// the Nano S's ~12 MHz.
 pub(crate) fn pps_etu(b: u8, ledger: bool) -> Option<f64> {
     let f = match FI[(b >> 4) as usize] {
         None if ledger && b >> 4 == 8 => Some(256),
         f => f,
     };
-    f.zip(DI[(b & 15) as usize]).map(|(f, d)| f as f64 / d as f64)
+    let d = match b & 15 {
+        8 if ledger => Some(128),
+        i => DI[i as usize],
+    };
+    f.zip(d).map(|(f, d)| f as f64 / d as f64)
 }
 
 /// Describes a TA1 / PPS1 byte (`FI` high nibble, `DI` low nibble).
@@ -143,6 +149,9 @@ pub struct Iso7816 {
     rst: Option<u8>,
     /// Reset is held: the I/O line is ignored.
     in_reset: bool,
+    /// Reset went low at this sample but not for long enough yet to be a
+    /// reset rather than a glitch.
+    rst_low_since: Option<u64>,
     /// Sessions started (reset releases seen).
     session: u32,
     /// Clock cycles per bit to apply at the next character (set at reset
@@ -180,6 +189,7 @@ impl Iso7816 {
             clock: ClockMeter::default(),
             rst: None,
             in_reset: false,
+            rst_low_since: None,
             session: 0,
             pending_etu: None,
             phase: Phase::Atr,
@@ -251,6 +261,26 @@ impl Iso7816 {
         };
         self.pending_etu = None;
         self.uart.set_bit_time(etu * spc, at, out);
+    }
+
+    /// Shortest reset pulse taken as a reset: ISO 7816-3 holds reset low
+    /// for at least 400 clock cycles; shorter pulses are glitches (e.g. a
+    /// reset line near the analyzer's threshold). 10 µs without a clock.
+    fn min_reset(&self) -> u64 {
+        match self.clock.samples_per_cycle() {
+            Some(spc) => (400.0 * spc) as u64,
+            None => self.samplerate / 100_000,
+        }
+    }
+
+    /// Asserts a pending reset once it lasted long enough.
+    fn check_reset(&mut self, now: u64, out: &mut Vec<Annotation>) {
+        if let Some(since) = self.rst_low_since
+            && now.saturating_sub(since) >= self.min_reset()
+        {
+            self.rst_low_since = None;
+            self.reset_line(false, since, out);
+        }
     }
 
     fn reset_line(&mut self, high: bool, at: u64, out: &mut Vec<Annotation>) {
@@ -621,6 +651,10 @@ impl Decoder for Iso7816 {
             .fold(self.uart.channels(), |m, c| m | 1 << c)
     }
 
+    fn display(&self) -> Option<super::DisplayView> {
+        self.seph.as_ref().and_then(Seph::display)
+    }
+
     fn init(&mut self, state: u32) {
         self.uart.init(state);
         if let Some(r) = self.rst {
@@ -636,10 +670,19 @@ impl Decoder for Iso7816 {
         {
             self.clock.rising(t.at);
         }
+        self.check_reset(t.at, out);
         if let Some(r) = self.rst
             && changed >> r & 1 != 0
         {
-            self.reset_line(t.now >> r & 1 != 0, t.at, out);
+            let high = t.now >> r & 1 != 0;
+            if self.in_reset {
+                self.reset_line(high, t.at, out);
+            } else if high {
+                // Back high before it counted: a glitch.
+                self.rst_low_since = None;
+            } else {
+                self.rst_low_since = Some(t.at);
+            }
         }
         if self.in_reset || changed & self.uart.channels() == 0 {
             return;
@@ -655,6 +698,7 @@ impl Decoder for Iso7816 {
     }
 
     fn advance(&mut self, to: u64, out: &mut Vec<Annotation>) {
+        self.check_reset(to, out);
         if self.in_reset {
             return;
         }
