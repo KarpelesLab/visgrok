@@ -12,9 +12,12 @@
 # viewer), and after recording, every distinct screen is written as a PNG
 # to FILE-screens/.
 #
+# View only (nothing written to disk: no capture, sidecar or screens):
+#   ./capture_nanos.sh --view [visgrok args...]
+#
 # Environment overrides:
 #   RATE=100M            sample rate
-#   OUT=file.vgk         output file (OUT= to not record)
+#   OUT=file.vgk         output file (OUT= to not record, same as --view)
 #   THRESHOLD=1.0        input threshold in volts
 #   DURATION=10          stop after N seconds
 #   SCALE=4              PNG pixel scale for the saved screens
@@ -25,6 +28,10 @@ cd "$(dirname "$0")"
 
 RATE=${RATE:-200M}
 OUT=${OUT-capture-nanos-$(date +%Y%m%d-%H%M%S).vgk}
+if [ "${1:-}" = --view ]; then
+    shift
+    OUT=
+fi
 
 echo -n "Building (if needed)..."
 cargo build --release -q
